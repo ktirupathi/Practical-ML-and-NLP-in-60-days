@@ -1,0 +1,35 @@
+version: "3.8"
+
+services:
+  doc-classifier-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: doc-classifier-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - model-artifacts:/app/artifacts
+      - ./logs:/app/logs
+    environment:
+      - MODEL_NAME=microsoft/dit-base-finetuned-rvlcdip
+      - NUM_LABELS=16
+      - IMAGE_SIZE=224
+      - LOG_LEVEL=INFO
+      - WORKERS=1
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 2G
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  model-artifacts:

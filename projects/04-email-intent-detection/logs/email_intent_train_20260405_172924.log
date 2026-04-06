@@ -1,0 +1,65 @@
+2026-04-05 17:29:24 - __main__ - INFO - Starting Email Intent Detection training pipeline.
+2026-04-05 17:29:24 - src.pipeline.training_pipeline - INFO - ============================================================
+2026-04-05 17:29:24 - src.pipeline.training_pipeline - INFO - STEP 1: Data Ingestion
+2026-04-05 17:29:24 - src.pipeline.training_pipeline - INFO - ============================================================
+2026-04-05 17:29:24 - src.components.data_ingestion - WARNING - Raw data directory not found: artifacts/raw_emails. Creating a small synthetic dataset for demonstration.
+2026-04-05 17:29:24 - src.components.data_ingestion - INFO - Created synthetic dataset with 64 samples at artifacts/ingested/emails.csv
+2026-04-05 17:29:24 - src.pipeline.training_pipeline - INFO - Ingested 64 records from artifacts/ingested/emails.csv
+2026-04-05 17:29:24 - src.pipeline.training_pipeline - INFO - ============================================================
+2026-04-05 17:29:24 - src.pipeline.training_pipeline - INFO - STEP 2: Data Validation
+2026-04-05 17:29:24 - src.pipeline.training_pipeline - INFO - ============================================================
+2026-04-05 17:29:24 - src.components.data_validation - INFO - Schema validation passed. All expected columns present.
+2026-04-05 17:29:24 - src.components.data_validation - INFO - All intent labels are valid: ['request', 'inform', 'schedule', 'follow_up', 'complaint', 'inquiry', 'approval', 'rejection']
+2026-04-05 17:29:24 - src.components.data_validation - INFO - No rows with empty text found.
+2026-04-05 17:29:24 - src.components.data_validation - INFO - No duplicate rows found.
+2026-04-05 17:29:24 - src.components.data_validation - INFO - Sample count check passed: 64 >= 20
+2026-04-05 17:29:24 - src.components.data_validation - INFO - Intent distribution (counts):
+intent
+request      8
+inform       8
+schedule     8
+follow_up    8
+complaint    8
+inquiry      8
+approval     8
+rejection    8
+2026-04-05 17:29:24 - src.components.data_validation - INFO - Intent distribution (proportions):
+request      0.125
+inform       0.125
+schedule     0.125
+follow_up    0.125
+complaint    0.125
+inquiry      0.125
+approval     0.125
+rejection    0.125
+2026-04-05 17:29:24 - src.components.data_validation - INFO - Data validation PASSED. Report: {'passed': True, 'total_samples': 64, 'schema_valid': True, 'intents_valid': True, 'invalid_labels': [], 'empty_text_rows': 0, 'duplicate_rows': 0, 'min_samples_met': True, 'distribution': {'request': 0.125, 'inform': 0.125, 'schedule': 0.125, 'follow_up': 0.125, 'complaint': 0.125, 'inquiry': 0.125, 'approval': 0.125, 'rejection': 0.125}, 'errors': []}
+2026-04-05 17:29:24 - src.pipeline.training_pipeline - INFO - Data validation passed.
+2026-04-05 17:29:24 - src.pipeline.training_pipeline - INFO - ============================================================
+2026-04-05 17:29:24 - src.pipeline.training_pipeline - INFO - STEP 3: Data Transformation
+2026-04-05 17:29:24 - src.pipeline.training_pipeline - INFO - ============================================================
+2026-04-05 17:29:24 - src.components.data_transformation - INFO - Starting data transformation on 64 samples.
+2026-04-05 17:29:24 - src.components.data_transformation - INFO - Splitting data: test_size=0.20
+2026-04-05 17:29:24 - src.components.data_transformation - INFO - Split sizes: train=51, test=13
+2026-04-05 17:29:24 - src.components.data_transformation - INFO - Fitting TF-IDF vectorizer (max_features=15000, ngram_range=[1, 2]).
+2026-04-05 17:29:24 - src.components.data_transformation - INFO - TF-IDF matrix shapes: train=(51, 223), test=(13, 223)
+2026-04-05 17:29:24 - src.utils.common - INFO - Object saved to artifacts/transformed/tfidf_vectorizer.pkl
+2026-04-05 17:29:24 - src.components.data_transformation - INFO - Saved TF-IDF vectorizer to artifacts/transformed/tfidf_vectorizer.pkl
+2026-04-05 17:29:24 - src.pipeline.training_pipeline - INFO - Transformation complete. Train shape: (51, 223), Test shape: (13, 223)
+2026-04-05 17:29:24 - src.pipeline.training_pipeline - INFO - ============================================================
+2026-04-05 17:29:24 - src.pipeline.training_pipeline - INFO - STEP 4: Model Training
+2026-04-05 17:29:24 - src.pipeline.training_pipeline - INFO - ============================================================
+2026-04-05 17:29:24 - __main__ - ERROR - Training pipeline failed: LogisticRegression.__init__() got an unexpected keyword argument 'multi_class'
+Traceback (most recent call last):
+  File "/home/user/Practical-ML-and-NLP-in-60-days/projects/04-email-intent-detection/train.py", line 19, in main
+    results = pipeline.run()
+              ^^^^^^^^^^^^^^
+  File "/home/user/Practical-ML-and-NLP-in-60-days/projects/04-email-intent-detection/src/pipeline/training_pipeline.py", line 97, in run
+    best_model, best_name, scores = trainer.train(
+                                    ^^^^^^^^^^^^^^
+  File "/home/user/Practical-ML-and-NLP-in-60-days/projects/04-email-intent-detection/src/components/model_trainer.py", line 77, in train
+    models = self._get_models()
+             ^^^^^^^^^^^^^^^^^^
+  File "/home/user/Practical-ML-and-NLP-in-60-days/projects/04-email-intent-detection/src/components/model_trainer.py", line 47, in _get_models
+    "LogisticRegression": LogisticRegression(
+                          ^^^^^^^^^^^^^^^^^^^
+TypeError: LogisticRegression.__init__() got an unexpected keyword argument 'multi_class'
