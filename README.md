@@ -2,7 +2,7 @@
 
 # 🚀 60 Days of End-to-End Machine Learning & NLP
 
-### *From Zero to Production-Ready ML/NLP Engineer in 60 Days*
+### *The Complete ML/NLP Course: Theory + Math + Code + Projects + Deployment*
 
 [![GitHub Stars](https://img.shields.io/github/stars/ktirupathi/practical-ml-and-nlp-in-60-days?style=for-the-badge&logo=github&color=yellow)](https://github.com/ktirupathi/practical-ml-and-nlp-in-60-days/stargazers)
 [![GitHub Forks](https://img.shields.io/github/forks/ktirupathi/practical-ml-and-nlp-in-60-days?style=for-the-badge&logo=github&color=blue)](https://github.com/ktirupathi/practical-ml-and-nlp-in-60-days/network/members)
@@ -14,11 +14,11 @@
 
 ---
 
-**10 production-grade ML & NLP projects** | **Real-world datasets** | **End-to-end pipelines** | **FastAPI deployments**
+**10 production-grade projects** | **8 weeks of deep theory** | **20+ real datasets** | **80+ assignments** | **Interview prep**
 
-*No Titanic. No Iris. No toy datasets. Only real-world, portfolio-ready projects.*
+*No Titanic. No Iris. No toy datasets. Only real-world, portfolio-ready projects with full math + code.*
 
-[Get Started](#-quick-start) · [60-Day Roadmap](#-60-day-roadmap) · [Projects](#-project-showcase) · [Datasets](#-dataset-catalog) · [Contributing](#-contributing)
+[Get Started](#-quick-start) · [Week-wise Theory](#-8-week-learning-path) · [Projects](#-project-showcase) · [Assignments](#-weekly-assignments) · [Datasets](#-dataset-catalog)
 
 ---
 
@@ -34,13 +34,16 @@
 - [What Makes This Different](#-what-makes-this-different)
 - [Learning Outcomes](#-learning-outcomes)
 - [Quick Start](#-quick-start)
+- [8-Week Learning Path](#-8-week-learning-path)
+- [Weekly Assignments](#-weekly-assignments)
 - [60-Day Roadmap](#-60-day-roadmap)
 - [Project Showcase](#-project-showcase)
 - [Dataset Catalog](#-dataset-catalog)
 - [Repository Structure](#-repository-structure)
 - [Tech Stack](#-tech-stack)
-- [Progress Tracker](#-progress-tracker)
 - [Deployment Guide](#-deployment-guide)
+- [MLOps Guide](#-mlops-guide)
+- [Progress Tracker](#-progress-tracker)
 - [Contributing](#-contributing)
 - [License](#-license)
 
@@ -62,11 +65,13 @@
 
 | Feature | Typical ML Repos | This Repo |
 |---------|------------------|-----------|
-| **Datasets** | Titanic, Iris, MNIST | Real-world Kaggle/HuggingFace datasets (5,000+ rows each) |
+| **Datasets** | Titanic, Iris, MNIST | 20+ real-world Kaggle/HuggingFace datasets (5,000+ rows each) |
+| **Theory** | Brief overview | Full explanations with math, intuition, worked examples, code |
+| **Assignments** | None | 80+ coding questions, 16 case studies, 24 practical assignments |
 | **Pipeline** | Jupyter notebook only | Full production pipeline with logging, validation, API |
 | **Deployment** | None | FastAPI + Streamlit + Docker |
 | **Code Quality** | Scripts | Modular OOP with exception handling |
-| **Documentation** | Minimal | Complete README per project with architecture diagrams |
+| **Interview Prep** | None | 80+ conceptual questions with answers per week |
 | **Scope** | Single model training | Data ingestion to validation to training to evaluation to deployment |
 
 ---
@@ -105,6 +110,55 @@ cd roadmap/day-01-environment-setup
 ```
 
 > **Start Here:** If you are new, begin with the [60-Day Roadmap](#-60-day-roadmap) and follow it sequentially. Each day builds on the previous one.
+
+---
+
+## 8-Week Learning Path
+
+Each week includes **deep theory with 10-point coverage** for every topic: concept explanation, real-world examples, mathematical intuition, Python implementation, visualizations, common mistakes, and interview questions.
+
+| Week | Theme | Topics | Theory | Assignments | Project |
+|------|-------|--------|--------|-------------|---------|
+| 1 | [Python + Math + Setup](week-wise/week-01-python-math-setup/) | Python, NumPy, Pandas, Statistics, Linear Algebra, Visualization, Preprocessing | [Read](week-wise/week-01-python-math-setup/) | [Do](assignments/week-01-python-math/) | - |
+| 2 | [ML Fundamentals](week-wise/week-02-ml-fundamentals/) | EDA, Regression, Trees, Boosting, SVM, KNN | [Read](week-wise/week-02-ml-fundamentals/) | [Do](assignments/week-02-ml-fundamentals/) | - |
+| 3 | [Supervised Learning](week-wise/week-03-supervised-learning/) | Clustering, PCA, Evaluation, Tuning, Imbalanced, Pipelines | [Read](week-wise/week-03-supervised-learning/) | [Do](assignments/week-03-supervised-learning/) | Sales Forecasting |
+| 4 | [MLOps + Deployment](week-wise/week-04-unsupervised-feature-engineering/) | MLflow, DVC, FastAPI, Streamlit, Docker | [Read](week-wise/week-04-unsupervised-feature-engineering/) | [Do](assignments/week-04-mlops-deployment/) | Resume Screening, Ticket Router |
+| 5 | [NLP Foundations](week-wise/week-05-nlp-foundations/) | Text Preprocessing, TF-IDF, Classification, NER, Topics | [Read](week-wise/week-05-nlp-foundations/) | [Do](assignments/week-05-nlp-foundations/) | Email Intent, Multilabel, Reviews |
+| 6 | [Advanced NLP](week-wise/week-06-advanced-nlp-transformers/) | Embeddings, Transformers, BERT, Summarization | [Read](week-wise/week-06-advanced-nlp-transformers/) | [Do](assignments/week-06-advanced-nlp/) | - |
+| 7 | [End-to-End Projects](week-wise/week-07-end-to-end-projects/) | BERT Fine-tuning, Sentence-BERT, FAISS, RAG | [Read](week-wise/week-07-end-to-end-projects/) | [Do](assignments/week-07-projects/) | Financial Risk, Search, RAG Chatbot |
+| 8 | [Production + Career](week-wise/week-08-deployment-mlops/) | LoRA, Monitoring, A/B Testing, System Design, Interviews | [Read](week-wise/week-08-deployment-mlops/) | [Do](assignments/week-08-deployment-mlops/) | Enterprise Doc Classification |
+
+### What Each Theory Section Covers
+
+For **every topic** in every week, you get:
+
+1. **What** — Clear concept explanation (2-3 paragraphs)
+2. **Why** — Practical importance and use cases
+3. **Real-world example** — Concrete business scenario
+4. **Intuition** — Simple, plain-language explanation
+5. **Math** — Key formulas with step-by-step derivation
+6. **Worked example** — Numerical walkthrough
+7. **Python code** — Complete runnable implementation
+8. **Visualization** — Chart/plot code with matplotlib/seaborn
+9. **Common mistakes** — 3-5 pitfalls beginners make
+10. **Interview questions** — 3-5 Q&A pairs
+
+---
+
+## Weekly Assignments
+
+Each week includes **10 conceptual questions, 10 coding questions, 2 case studies, and 3 practical assignments** using real datasets.
+
+| Week | Assignment | Solutions | Datasets Used | Difficulty |
+|------|-----------|-----------|---------------|------------|
+| 1 | [Questions + Assignments](assignments/week-01-python-math/) | [Solutions](assignments/week-01-python-math/solutions.md) | California Housing, WHO Life Expectancy, Ames Housing | Easy-Medium |
+| 2 | [Questions + Assignments](assignments/week-02-ml-fundamentals/) | [Solutions](assignments/week-02-ml-fundamentals/solutions.md) | Bank Marketing, Adult Census Income | Medium |
+| 3 | [Questions + Assignments](assignments/week-03-supervised-learning/) | [Solutions](assignments/week-03-supervised-learning/solutions.md) | Credit Card Fraud, Telco Churn, Mall Customers | Medium-Hard |
+| 4 | [Questions + Assignments](assignments/week-04-mlops-deployment/) | [Solutions](assignments/week-04-mlops-deployment/solutions.md) | Custom ML models | Medium-Hard |
+| 5 | [Questions + Assignments](assignments/week-05-nlp-foundations/) | [Solutions](assignments/week-05-nlp-foundations/solutions.md) | 20 Newsgroups, CoNLL-2003, BBC News | Medium |
+| 6 | [Questions + Assignments](assignments/week-06-advanced-nlp/) | [Solutions](assignments/week-06-advanced-nlp/solutions.md) | IMDB Reviews, CNN/DailyMail | Medium-Hard |
+| 7 | [Questions + Assignments](assignments/week-07-projects/) | [Solutions](assignments/week-07-projects/solutions.md) | Financial PhraseBank, MS MARCO, SQuAD 2.0 | Hard |
+| 8 | [Questions + Assignments](assignments/week-08-deployment-mlops/) | [Solutions](assignments/week-08-deployment-mlops/solutions.md) | Model monitoring datasets | Hard |
 
 ---
 
@@ -223,20 +277,37 @@ cd roadmap/day-01-environment-setup
 
 ## Dataset Catalog
 
-All datasets are **real, publicly available, and contain 5,000+ rows**.
+All datasets are **real, publicly available, and contain 5,000+ rows**. Full dataset documentation with schemas, sample rows, preprocessing steps, and feature engineering ideas: [datasets/README.md](datasets/).
 
-| # | Dataset | Source | Rows | Features | Download |
-|---|---------|--------|------|----------|----------|
-| 1 | Walmart Store Sales | Kaggle | 421,570 | 16 | [Link](https://www.kaggle.com/datasets/mikhail1681/walmart-sales) |
-| 2 | Resume Dataset | Kaggle | 2,484 resumes | 4 categories | [Link](https://www.kaggle.com/datasets/gauravduttakiit/resume-dataset) |
-| 3 | Bitext Customer Support | HuggingFace | 100,000+ | 8 | [Link](https://huggingface.co/datasets/Bitext/Bitext-customer-support-llm-chatbot-training-dataset) |
-| 4 | Enron Email Dataset | CMU | 500,000+ | 6 | [Link](https://www.cs.cmu.edu/~enron/) |
-| 5 | EUR-Lex (EURLEX57K) | Research | 57,000 | Multi-label | [Link](http://nlp.cs.aueb.gr/software_and_datasets/EURLEX57K/) |
-| 6 | Amazon Product Reviews | HuggingFace | 34M+ | 9 | [Link](https://huggingface.co/datasets/McAuley-Lab/Amazon-Reviews-2023) |
-| 7 | Financial PhraseBank | HuggingFace | 4,846 | 2 | [Link](https://huggingface.co/datasets/financial_phrasebank) |
-| 8 | MS MARCO | Microsoft | 8.8M passages | 4 | [Link](https://microsoft.github.io/msmarco/) |
-| 9 | SQuAD 2.0 | Stanford | 150,000+ | 5 | [Link](https://rajpurkar.github.io/SQuAD-explorer/) |
-| 10 | RVL-CDIP | HuggingFace | 400,000 | 16 classes | [Link](https://huggingface.co/datasets/rvl_cdip) |
+### Project Datasets
+
+| # | Dataset | Source | Rows | Download |
+|---|---------|--------|------|----------|
+| 1 | Walmart Store Sales | Kaggle | 421,570 | [Link](https://www.kaggle.com/datasets/mikhail1681/walmart-sales) |
+| 2 | Resume Dataset | Kaggle | 2,484 | [Link](https://www.kaggle.com/datasets/gauravduttakiit/resume-dataset) |
+| 3 | Bitext Customer Support | HuggingFace | 100,000+ | [Link](https://huggingface.co/datasets/Bitext/Bitext-customer-support-llm-chatbot-training-dataset) |
+| 4 | Enron Email Dataset | CMU | 500,000+ | [Link](https://www.cs.cmu.edu/~enron/) |
+| 5 | EUR-Lex (EURLEX57K) | Research | 57,000 | [Link](http://nlp.cs.aueb.gr/software_and_datasets/EURLEX57K/) |
+| 6 | Amazon Product Reviews | HuggingFace | 34M+ | [Link](https://huggingface.co/datasets/McAuley-Lab/Amazon-Reviews-2023) |
+| 7 | Financial PhraseBank | HuggingFace | 4,846 | [Link](https://huggingface.co/datasets/financial_phrasebank) |
+| 8 | MS MARCO | Microsoft | 8.8M | [Link](https://microsoft.github.io/msmarco/) |
+| 9 | SQuAD 2.0 | Stanford | 150,000+ | [Link](https://rajpurkar.github.io/SQuAD-explorer/) |
+| 10 | RVL-CDIP | HuggingFace | 400,000 | [Link](https://huggingface.co/datasets/rvl_cdip) |
+
+### Assignment Datasets
+
+| # | Dataset | Source | Rows | Used In |
+|---|---------|--------|------|---------|
+| 11 | California Housing | sklearn | 20,640 | Week 1 |
+| 12 | Bank Marketing | UCI | 45,211 | Week 2 |
+| 13 | Adult Census Income | UCI | 48,842 | Week 2 |
+| 14 | Credit Card Fraud | Kaggle | 284,807 | Week 3 |
+| 15 | Telco Customer Churn | Kaggle | 7,043 | Week 3 |
+| 16 | 20 Newsgroups | sklearn | 18,846 | Week 5 |
+| 17 | IMDB Reviews | HuggingFace | 50,000 | Week 6 |
+| 18 | BBC News | Kaggle | 2,225 | Week 5 |
+| 19 | CoNLL-2003 NER | HuggingFace | 20,744 | Week 5 |
+| 20 | CNN/DailyMail | HuggingFace | 311,971 | Week 6 |
 
 ---
 
@@ -245,62 +316,63 @@ All datasets are **real, publicly available, and contain 5,000+ rows**.
 ```
 practical-ml-and-nlp-in-60-days/
 │
-├── README.md
-├── CONTRIBUTING.md
-├── LICENSE
-├── requirements.txt
-├── PROGRESS_TRACKER.md
+├── README.md                          # You are here
+├── CONTRIBUTING.md                    # Contribution guidelines
+├── LICENSE                            # MIT License
+├── requirements.txt                   # Core dependencies
+├── PROGRESS_TRACKER.md                # Checklist tracker
 │
-├── roadmap/
+├── week-wise/                         # NEW: Deep theory content
+│   ├── week-01-python-math-setup/     #   Full explanations + math + code
+│   ├── week-02-ml-fundamentals/       #   10-point coverage per topic
+│   ├── week-03-supervised-learning/
+│   ├── week-04-unsupervised-feature-engineering/
+│   ├── week-05-nlp-foundations/
+│   ├── week-06-advanced-nlp-transformers/
+│   ├── week-07-end-to-end-projects/
+│   └── week-08-deployment-mlops/
+│
+├── assignments/                       # NEW: Weekly assignments
+│   ├── week-01-python-math/           #   Questions + solutions + datasets
+│   ├── week-02-ml-fundamentals/
+│   ├── ...
+│   └── week-08-deployment-mlops/
+│
+├── datasets/                          # NEW: Dataset catalog (20+ datasets)
+├── deployment/                        # NEW: Deployment guides
+├── mlops/                             # NEW: MLOps guides
+├── visuals/                           # NEW: Visualization guide
+├── progress-tracker/                  # NEW: Interactive progress tracking
+│
+├── roadmap/                           # Day-by-day learning guides
 │   ├── day-01-environment-setup/
 │   ├── day-02-python-for-ml/
 │   ├── ...
-│   └── day-60-graduation/
+│   └── day-60-graduation-next-steps/
 │
-├── projects/
-│   ├── 01-sales-forecasting/
-│   │   ├── README.md
-│   │   ├── dataset_link.md
-│   │   ├── notebooks/
-│   │   │   └── eda.ipynb
-│   │   ├── src/
-│   │   │   ├── __init__.py
-│   │   │   ├── components/
-│   │   │   │   ├── data_ingestion.py
-│   │   │   │   ├── data_validation.py
-│   │   │   │   ├── data_transformation.py
-│   │   │   │   ├── model_trainer.py
-│   │   │   │   └── model_evaluation.py
-│   │   │   ├── pipeline/
-│   │   │   │   ├── training_pipeline.py
-│   │   │   │   └── prediction_pipeline.py
-│   │   │   ├── utils/
-│   │   │   │   └── common.py
-│   │   │   └── config/
-│   │   │       └── configuration.py
-│   │   ├── app.py
-│   │   ├── train.py
-│   │   ├── predict.py
-│   │   ├── requirements.txt
-│   │   └── logs/
-│   │       └── .gitkeep
-│   │
+├── projects/                          # 10 production-grade projects
+│   ├── 01-sales-forecasting/          #   Each with full pipeline:
+│   │   ├── README.md                  #   data_ingestion, validation,
+│   │   ├── dataset_link.md            #   transformation, training,
+│   │   ├── src/components/            #   evaluation, FastAPI, logging
+│   │   ├── src/pipeline/
+│   │   ├── src/utils/
+│   │   ├── src/config/
+│   │   ├── app.py                     #   FastAPI endpoint
+│   │   ├── train.py                   #   Training script
+│   │   └── predict.py                 #   Inference script
 │   ├── 02-ai-resume-screening/
-│   ├── 03-support-ticket-router/
 │   ├── ...
 │   └── 10-enterprise-document-classification/
 │
 ├── .github/
 │   ├── ISSUE_TEMPLATE/
-│   │   ├── bug_report.md
-│   │   ├── feature_request.md
-│   │   └── project_idea.md
 │   └── PULL_REQUEST_TEMPLATE.md
 │
-└── assets/
-    └── images/
-        └── .gitkeep
+└── assets/images/
 ```
+
+Each **project** contains 20+ files with modular OOP code, logging, config management, and FastAPI deployment.
 
 ---
 
@@ -341,6 +413,8 @@ Phase 6: Capstone           [░░░░░░░░░░] 0/10
 
 ## Deployment Guide
 
+Full deployment documentation: [deployment/README.md](deployment/)
+
 ### FastAPI (All Projects)
 
 ```bash
@@ -364,6 +438,16 @@ cd projects/10-enterprise-document-classification
 docker build -t doc-classifier .
 docker run -p 8000:8000 doc-classifier
 ```
+
+See the [full deployment guide](deployment/) for cloud deployment, CI/CD with GitHub Actions, API testing, and more.
+
+---
+
+## MLOps Guide
+
+Full MLOps documentation: [mlops/README.md](mlops/)
+
+Covers experiment tracking (MLflow), data versioning (DVC), model monitoring (drift detection), feature stores, A/B testing, and CI/CD for ML pipelines.
 
 ---
 
