@@ -1,5 +1,0 @@
-2026-04-05 17:29:47 - src.utils.common - INFO - Object loaded from artifacts/transformed/tfidf_vectorizer.pkl
-2026-04-05 17:29:47 - src.pipeline.prediction_pipeline - INFO - Loaded vectorizer from artifacts/transformed/tfidf_vectorizer.pkl
-2026-04-05 17:29:47 - src.utils.common - INFO - Object loaded from artifacts/models/best_model.pkl
-2026-04-05 17:29:47 - src.pipeline.prediction_pipeline - INFO - Loaded model from artifacts/models/best_model.pkl
-2026-04-05 17:29:47 - src.pipeline.prediction_pipeline - INFO - Prediction: intent=schedule, confidence=0.2249
