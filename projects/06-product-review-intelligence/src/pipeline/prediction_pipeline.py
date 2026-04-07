@@ -1,127 +1,109 @@
-"""Prediction pipeline: loads model and vectorizer, predicts sentiment and extracts aspects."""
+"""Prediction pipeline for Product Review Intelligence.
 
-from pathlib import Path
-from typing import Dict
+Orchestrates aspect extraction (spaCy), aspect-level sentiment
+(cardiffnlp/twitter-roberta-base-sentiment), overall sentiment, and
+star-rating prediction into a single callable interface.
+"""
 
-import numpy as np
-from scipy.sparse import hstack, csr_matrix
+import logging
+from typing import Dict, List, Optional
 
-from src.components.model_trainer import AspectExtractor
-from src.config.configuration import ARTIFACTS_DIR, ModelTrainerConfig, DataTransformationConfig
-from src.utils.common import clean_text, load_artifact, setup_logger
+from src.components.aspect_extractor import AspectExtractor
+from src.components.sentiment_analyzer import SentimentAnalyzer
 
-logger = setup_logger("prediction_pipeline")
+logger = logging.getLogger(__name__)
 
 
 class PredictionPipeline:
-    """Predicts sentiment and extracts aspects from new review text."""
+    """End-to-end review analysis: aspects → sentiment → rating → summary.
 
-    def __init__(self):
-        self.model = None
-        self.vectorizer = None
-        self.label_encoder = None
-        self.aspect_extractor = AspectExtractor()
-        self._load_artifacts()
+    Composes AspectExtractor and SentimentAnalyzer.  Both components lazy-load
+    their underlying models on first use.
 
-    def _load_artifacts(self):
-        """Load the saved model, vectorizer, and label encoder."""
-        trainer_cfg = ModelTrainerConfig()
-        trans_cfg = DataTransformationConfig()
+    Args:
+        use_spacy: Use spaCy dependency parsing for aspect extraction.
+        sentiment_model: HuggingFace model ID for aspect-level sentiment.
+    """
 
-        model_path = trainer_cfg.models_dir / "best_model.joblib"
-        vectorizer_path = trans_cfg.vectorizer_path
-        label_encoder_path = trans_cfg.vectorizer_path.parent / "label_encoder.joblib"
-
-        if not model_path.exists():
-            raise FileNotFoundError(
-                f"Model not found at {model_path}. Run the training pipeline first."
-            )
-        if not vectorizer_path.exists():
-            raise FileNotFoundError(
-                f"Vectorizer not found at {vectorizer_path}. Run the training pipeline first."
-            )
-        if not label_encoder_path.exists():
-            raise FileNotFoundError(
-                f"Label encoder not found at {label_encoder_path}. Run the training pipeline first."
-            )
-
-        self.model = load_artifact(model_path)
-        self.vectorizer = load_artifact(vectorizer_path)
-        self.label_encoder = load_artifact(label_encoder_path)
-        logger.info("Model artifacts loaded successfully")
-
-    def predict(
+    def __init__(
         self,
-        review_text: str,
-        review_title: str = "",
-        helpful_vote: int = 0,
-        verified_purchase: bool = True,
-    ) -> Dict:
-        """Predict sentiment and extract aspects from a review.
+        use_spacy: bool = True,
+        sentiment_model: str = "cardiffnlp/twitter-roberta-base-sentiment",
+    ):
+        self.aspect_extractor = AspectExtractor(use_spacy=use_spacy)
+        self.sentiment_analyzer = SentimentAnalyzer(sentiment_model=sentiment_model)
+
+    def analyze(self, review_text: str) -> Dict:
+        """Analyse a product review end-to-end.
+
+        Steps:
+            1. Extract aspects via spaCy / regex.
+            2. Pair each aspect with its context sentence.
+            3. Run aspect-level sentiment in batch.
+            4. Run overall sentiment on full review text.
+            5. Predict star rating from overall sentiment.
+            6. Generate a plain-English summary.
 
         Args:
-            review_text: The review body text.
-            review_title: Optional review title.
-            helpful_vote: Number of helpful votes.
-            verified_purchase: Whether purchase was verified.
+            review_text: Raw product review text.
 
         Returns:
-            Dictionary with 'sentiment', 'confidence', and 'aspects'.
+            Dict with keys:
+                overall_sentiment (str),
+                rating_prediction (int, 1–5),
+                aspects (list[{aspect, sentiment, score}]),
+                summary (str).
         """
-        # Clean text
-        full_text = f"{review_title} {review_text}".strip()
-        cleaned = clean_text(full_text)
-
-        if not cleaned:
+        if not review_text or not review_text.strip():
+            logger.warning("Empty review_text; returning default response.")
             return {
-                "sentiment": "neutral",
-                "confidence": 0.0,
-                "aspects": {},
+                "overall_sentiment": "neutral",
+                "rating_prediction": 3,
+                "aspects": [],
+                "summary": "No review text provided.",
             }
 
-        # Vectorize text
-        tfidf_features = self.vectorizer.transform([cleaned])
+        # Step 1 & 2: extract aspects with context sentences
+        aspect_sentence_pairs = self.aspect_extractor.extract_with_sentences(review_text)
+        logger.info("Extracted %d aspects.", len(aspect_sentence_pairs))
 
-        # Compute numeric features
-        review_length = len(cleaned)
-        word_count = len(cleaned.split())
-        is_verified = int(verified_purchase)
-        helpful_log = np.log1p(helpful_vote)
+        # Step 3: aspect-level sentiment
+        aspect_results: List[Dict] = []
+        if aspect_sentence_pairs:
+            aspect_results = self.sentiment_analyzer.analyse_aspects_batch(aspect_sentence_pairs)
 
-        numeric_features = csr_matrix(
-            [[review_length, word_count, is_verified, helpful_log]]
+        # Step 4: overall sentiment
+        overall = self.sentiment_analyzer.analyse_overall(review_text)
+        overall_sentiment: str = overall["overall_sentiment"]
+        overall_score: float = overall.get("overall_score", 0.5)
+
+        # Step 5: star rating
+        rating = self.sentiment_analyzer.predict_rating(
+            review_text, overall_score=overall_score
         )
 
-        # Combine features
-        X = hstack([tfidf_features, numeric_features])
-
-        # Predict
-        pred_label_idx = self.model.predict(X)[0]
-        sentiment = self.label_encoder.inverse_transform([pred_label_idx])[0]
-
-        # Get confidence (probability of predicted class)
-        confidence = 0.0
-        if hasattr(self.model, "predict_proba"):
-            probas = self.model.predict_proba(X)[0]
-            confidence = float(probas[pred_label_idx])
-
-        # Extract aspects
-        aspects = self.aspect_extractor.extract_aspects(cleaned)
+        # Step 6: summary
+        summary = self.sentiment_analyzer.summarise(review_text, aspect_results)
 
         result = {
-            "sentiment": sentiment,
-            "confidence": round(confidence, 4),
-            "aspects": aspects,
+            "overall_sentiment": overall_sentiment,
+            "rating_prediction": rating,
+            "aspects": aspect_results,
+            "summary": summary,
         }
-
-        logger.info(f"Prediction: {result}")
+        logger.info(
+            "Analysis complete: sentiment=%s rating=%d aspects=%d",
+            overall_sentiment, rating, len(aspect_results),
+        )
         return result
 
+    def analyze_batch(self, review_texts: List[str]) -> List[Dict]:
+        """Analyse a list of product reviews.
 
-if __name__ == "__main__":
-    pipeline = PredictionPipeline()
-    result = pipeline.predict(
-        review_text="The battery life is amazing but the screen is too dim.",
-        review_title="Mixed feelings",
-    )
-    print(result)
+        Args:
+            review_texts: List of raw review text strings.
+
+        Returns:
+            List of analysis dicts in the same order.
+        """
+        return [self.analyze(text) for text in review_texts]
