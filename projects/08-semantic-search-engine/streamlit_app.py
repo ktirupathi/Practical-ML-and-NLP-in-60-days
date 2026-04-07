@@ -1,122 +1,204 @@
 """
-Streamlit Search UI: Interactive semantic search interface.
+Streamlit UI — Semantic Search Engine (Project 8).
 
 Features:
-- Query input box
-- Adjustable top-k slider
-- Results with passage text, similarity score, and passage ID
-- Search latency display
-- Backend selector (FAISS or ChromaDB)
+  - Search bar with example queries
+  - Adjustable top-k slider
+  - Cross-encoder re-ranking toggle
+  - Results with highlighted snippets, similarity score bars
+  - "Did you mean?" suggestion for misspelled queries
+  - Latency + index-size metrics in the header
 """
 
-import streamlit as st
 import time
+
+import streamlit as st
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Page config (must be first Streamlit call)
+# ─────────────────────────────────────────────────────────────────────────────
 
 st.set_page_config(
     page_title="Semantic Search Engine",
     page_icon="🔍",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
 
 
-@st.cache_resource
-def load_pipeline():
-    """Load the prediction pipeline (cached across reruns)."""
-    from src.pipeline.prediction_pipeline import PredictionPipeline
+# ─────────────────────────────────────────────────────────────────────────────
+# Resource caching
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@st.cache_resource(show_spinner="Loading search index …")
+def load_searcher():
+    """Load the Searcher once and cache it for the app lifetime."""
+    from src.components.searcher import Searcher
     from src.config.configuration import Config
 
-    config = Config()
-    pipeline = PredictionPipeline(config)
-    pipeline.load()
-    return pipeline
+    cfg = Config()
+    searcher = Searcher(config=cfg, use_reranker=True)
+    searcher.load()
+    return searcher
 
 
-def main():
-    st.title("Semantic Search Engine")
-    st.markdown("Search MS MARCO passages using sentence embeddings and vector similarity.")
+# ─────────────────────────────────────────────────────────────────────────────
+# Sidebar
+# ─────────────────────────────────────────────────────────────────────────────
 
-    # Sidebar configuration
-    st.sidebar.header("Settings")
-    top_k = st.sidebar.slider("Number of results (top-k)", min_value=1, max_value=50, value=10)
-    backend = st.sidebar.radio("Search backend", ["FAISS", "ChromaDB"])
-    show_scores = st.sidebar.checkbox("Show similarity scores", value=True)
-    show_ids = st.sidebar.checkbox("Show passage IDs", value=False)
+with st.sidebar:
+    st.title("Settings")
+    st.markdown("---")
 
-    # Load pipeline
-    try:
-        pipeline = load_pipeline()
-        st.sidebar.success(f"Index loaded: {pipeline.index.ntotal:,} passages")
-    except FileNotFoundError:
-        st.error(
-            "Search index not found. Please run `python train.py` first to build the index."
-        )
-        st.stop()
-    except Exception as e:
-        st.error(f"Failed to load search pipeline: {e}")
-        st.stop()
+    top_k = st.slider(
+        "Results to return (top-k)",
+        min_value=1, max_value=50, value=10,
+        help="How many ranked passages to display.",
+    )
+    use_reranker = st.toggle(
+        "Enable cross-encoder re-ranking",
+        value=True,
+        help=(
+            "Re-rank FAISS candidates with a cross-encoder for higher "
+            "precision (adds ~100–300 ms per query)."
+        ),
+    )
+    show_scores = st.checkbox("Show similarity scores", value=True)
+    show_passage_id = st.checkbox("Show passage IDs", value=False)
+    show_full_passage = st.checkbox("Show full passage (not just snippet)", value=False)
 
-    # Search input
-    query = st.text_input(
-        "Enter your search query:",
-        placeholder="e.g., What is machine learning?",
+    st.markdown("---")
+    st.subheader("About")
+    st.markdown(
+        """
+        **Semantic Search Engine** over MS MARCO (50K passages).
+
+        **How it works:**
+        1. Query is encoded with `all-MiniLM-L6-v2`
+        2. FAISS IndexFlatIP retrieves top-50 candidates
+        3. *(Optional)* Cross-encoder `ms-marco-MiniLM-L-6-v2` re-ranks
+        4. Highlighted snippets are returned
+
+        **Stack:** SentenceTransformers · FAISS · FastAPI · Streamlit
+        """
     )
 
-    # Example queries
-    st.markdown("**Try these example queries:**")
-    example_cols = st.columns(4)
-    examples = [
-        "what is machine learning",
-        "how does photosynthesis work",
-        "explain python programming",
-        "what is semantic search",
-    ]
-    for col, example in zip(example_cols, examples):
-        if col.button(example, use_container_width=True):
-            query = example
+# ─────────────────────────────────────────────────────────────────────────────
+# Load searcher
+# ─────────────────────────────────────────────────────────────────────────────
 
-    if query:
-        with st.spinner("Searching..."):
-            try:
-                if backend == "FAISS":
-                    response = pipeline.search(query, top_k=top_k)
-                else:
-                    response = pipeline.search_chromadb(query, top_k=top_k)
-            except Exception as e:
-                st.error(f"Search failed: {e}")
-                return
+try:
+    searcher = load_searcher()
+    n_indexed = searcher._index.ntotal if searcher._index else 0
+except FileNotFoundError:
+    st.error(
+        "Search index not found.  "
+        "Please run `python train.py` first to build the FAISS index."
+    )
+    st.stop()
+except Exception as exc:
+    st.error(f"Failed to load the search index: {exc}")
+    st.stop()
 
-        # Display metrics
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Results", len(response.results))
-        col2.metric("Latency", f"{response.latency_ms:.1f} ms")
-        col3.metric("Indexed Passages", f"{response.total_indexed:,}")
 
-        st.markdown("---")
+# ─────────────────────────────────────────────────────────────────────────────
+# Header
+# ─────────────────────────────────────────────────────────────────────────────
 
-        # Display results
-        if not response.results:
-            st.warning("No results found.")
-        else:
-            for result in response.results:
-                # Build result card
-                with st.container():
-                    header_parts = [f"**Rank {result.rank}**"]
-                    if show_scores:
-                        header_parts.append(f"Score: `{result.score:.4f}`")
-                    if show_ids:
-                        header_parts.append(f"ID: `{result.passage_id}`")
+st.title("Semantic Search Engine")
+st.caption(
+    f"Searching {n_indexed:,} MS MARCO passages · "
+    f"Model: all-MiniLM-L6-v2 · "
+    f"Re-ranker: {'enabled' if use_reranker else 'disabled'}"
+)
 
-                    st.markdown(" | ".join(header_parts))
+# ─────────────────────────────────────────────────────────────────────────────
+# Search input
+# ─────────────────────────────────────────────────────────────────────────────
+
+query = st.text_input(
+    "Search query",
+    placeholder="What is machine learning?",
+    label_visibility="collapsed",
+)
+
+# Example queries as clickable buttons
+st.markdown("**Try an example:**")
+examples = [
+    "what is machine learning",
+    "how does photosynthesis work",
+    "explain transformer neural networks",
+    "what is semantic search",
+    "history of the Roman Empire",
+    "how do vaccines work",
+    "what is gradient descent",
+    "explain quantum computing",
+]
+cols = st.columns(4)
+for i, example in enumerate(examples):
+    if cols[i % 4].button(example, use_container_width=True, key=f"ex_{i}"):
+        query = example
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Execute search
+# ─────────────────────────────────────────────────────────────────────────────
+
+if query.strip():
+    with st.spinner("Searching …"):
+        try:
+            t0 = time.time()
+            response = searcher.search(
+                query=query.strip(),
+                top_k=top_k,
+                use_reranker=use_reranker,
+            )
+            wall_ms = (time.time() - t0) * 1000
+        except Exception as exc:
+            st.error(f"Search failed: {exc}")
+            st.stop()
+
+    # ── "Did you mean?" ────────────────────────────────────────────────
+    if response.did_you_mean:
+        st.info(
+            f'Did you mean: **{response.did_you_mean}**?  '
+            f'[Search instead](/?query={response.did_you_mean})'
+        )
+
+    # ── Metrics row ────────────────────────────────────────────────────
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Results returned", len(response.results))
+    m2.metric("Search latency", f"{response.latency_ms:.0f} ms")
+    m3.metric("Passages indexed", f"{response.total_indexed:,}")
+
+    st.markdown("---")
+
+    # ── Results ────────────────────────────────────────────────────────
+    if not response.results:
+        st.warning("No results found. Try a different query.")
+    else:
+        for result in response.results:
+            with st.container():
+                # Header line
+                header_parts = [f"**#{result.rank}**"]
+                if show_scores:
+                    header_parts.append(f"Score: `{result.score:.4f}`")
+                if show_passage_id:
+                    header_parts.append(f"ID: `{result.passage_id}`")
+                header_parts.append(f"Source: *{result.source}*")
+                st.markdown("  ·  ".join(header_parts))
+
+                # Passage text
+                if show_full_passage:
                     st.markdown(result.passage)
+                else:
+                    # Show highlighted snippet (markdown bold)
+                    snippet_text = result.snippet or result.passage[:300] + "…"
+                    st.markdown(snippet_text)
 
-                    # Score bar
-                    if show_scores:
-                        # Normalize score for progress bar (scores are cosine sim in [0,1])
-                        normalized = max(0.0, min(1.0, result.score))
-                        st.progress(normalized)
+                # Relevance bar
+                if show_scores:
+                    bar_val = max(0.0, min(1.0, float(result.score)))
+                    st.progress(bar_val)
 
-                    st.markdown("---")
-
-
-if __name__ == "__main__":
-    main()
+                st.markdown("---")
