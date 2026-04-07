@@ -1,102 +1,138 @@
-"""Data ingestion component: loads Amazon Reviews from HuggingFace and samples a subset."""
+"""Data ingestion for Product Review Intelligence.
+
+Downloads the Amazon Reviews 2023 dataset (Electronics subset) from HuggingFace,
+samples a configurable number of records, cleans nulls/duplicates, and serialises
+a clean CSV for downstream transformation.
+
+Dataset: McAuley-Lab/Amazon-Reviews-2023, subset: raw_review_Electronics
+"""
+
+import logging
+from pathlib import Path
+from typing import Optional
 
 import pandas as pd
-from datasets import load_dataset
-from pathlib import Path
 
-from src.config.configuration import DataIngestionConfig
-from src.utils.common import ensure_dir, setup_logger
+logger = logging.getLogger(__name__)
 
-logger = setup_logger("data_ingestion")
+DATASET_NAME = "McAuley-Lab/Amazon-Reviews-2023"
+SUBSET_NAME = "raw_review_Electronics"
+DEFAULT_SAMPLE = 50_000
+REQUIRED_COLS = ["text", "rating", "title", "helpful_vote", "verified_purchase", "user_id"]
 
 
 class DataIngestion:
-    """Loads a subset of Amazon Reviews 2023 from HuggingFace and saves locally."""
+    """Downloads and pre-cleans Amazon Electronics reviews from HuggingFace.
 
-    def __init__(self, config: DataIngestionConfig = None):
-        self.config = config or DataIngestionConfig()
+    Args:
+        output_dir: Directory where ingested CSV is saved.
+        sample_size: Maximum number of records to keep.
+        random_seed: Seed for reproducible sampling.
+        trust_remote_code: Passed through to datasets.load_dataset.
+    """
 
-    def initiate_data_ingestion(self) -> Path:
-        """Download and sample reviews from HuggingFace.
+    def __init__(
+        self,
+        output_dir: str = "data/ingested",
+        sample_size: int = DEFAULT_SAMPLE,
+        random_seed: int = 42,
+        trust_remote_code: bool = True,
+    ):
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.sample_size = sample_size
+        self.random_seed = random_seed
+        self.trust_remote_code = trust_remote_code
+
+    def _download(self) -> pd.DataFrame:
+        """Stream-download the HuggingFace dataset and convert to DataFrame.
+
+        Returns:
+            Raw DataFrame with all available columns.
+        """
+        try:
+            from datasets import load_dataset  # type: ignore
+        except ImportError as exc:
+            raise ImportError("Install 'datasets' package: pip install datasets") from exc
+
+        logger.info("Loading %s / %s from HuggingFace …", DATASET_NAME, SUBSET_NAME)
+        ds = load_dataset(
+            DATASET_NAME,
+            SUBSET_NAME,
+            split="full",
+            trust_remote_code=self.trust_remote_code,
+        )
+        df = ds.to_pandas()
+        logger.info("Raw dataset size: %d rows", len(df))
+        return df
+
+    def _clean(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Remove nulls, empty text, duplicates, and coerce column types.
+
+        Args:
+            df: Raw DataFrame from HuggingFace.
+
+        Returns:
+            Cleaned DataFrame.
+        """
+        # Keep only needed columns where available
+        cols = [c for c in REQUIRED_COLS if c in df.columns]
+        df = df[cols].copy()
+
+        # Drop rows with null or empty review text
+        before = len(df)
+        df = df.dropna(subset=["text"])
+        df = df[df["text"].str.strip().str.len() > 0]
+        logger.info("Dropped %d null/empty-text rows.", before - len(df))
+
+        # Coerce types
+        df["title"] = df.get("title", pd.Series([""] * len(df))).fillna("")
+        df["rating"] = pd.to_numeric(df.get("rating", 3), errors="coerce")
+        df = df.dropna(subset=["rating"])
+        df["rating"] = df["rating"].astype(float).clip(1, 5)
+        df["helpful_vote"] = pd.to_numeric(df.get("helpful_vote", 0), errors="coerce").fillna(0).astype(int)
+        df["verified_purchase"] = df.get("verified_purchase", True).astype(bool)
+
+        # Deduplicate on (user_id, text)
+        if "user_id" in df.columns:
+            before = len(df)
+            df = df.drop_duplicates(subset=["user_id", "text"])
+            logger.info("Removed %d duplicate reviews.", before - len(df))
+
+        return df.reset_index(drop=True)
+
+    def ingest(self) -> Path:
+        """Run full ingestion pipeline.
+
+        Downloads, samples, cleans, and saves the dataset.
 
         Returns:
             Path to the saved ingested CSV file.
         """
-        logger.info("Starting data ingestion...")
-        logger.info(
-            f"Loading dataset '{self.config.dataset_name}' "
-            f"subset '{self.config.subset_name}' from HuggingFace"
-        )
+        logger.info("=== Data Ingestion Started ===")
+        df = self._download()
 
-        # Load dataset from HuggingFace
-        # The Amazon Reviews 2023 dataset uses category-specific subsets
-        dataset = load_dataset(
-            self.config.dataset_name,
-            self.config.subset_name,
-            split="full",
-            trust_remote_code=self.config.trust_remote_code,
-        )
+        # Sample
+        if len(df) > self.sample_size:
+            df = df.sample(n=self.sample_size, random_state=self.random_seed).reset_index(drop=True)
+            logger.info("Sampled %d records.", self.sample_size)
 
-        logger.info(f"Full dataset loaded with {len(dataset)} records")
+        df = self._clean(df)
+        logger.info("Final dataset: %d records.", len(df))
 
-        # Convert to pandas
-        df = dataset.to_pandas()
+        # Rating distribution
+        if "rating" in df.columns:
+            dist = df["rating"].value_counts().sort_index().to_dict()
+            logger.info("Rating distribution: %s", dist)
 
-        # Sample to target size
-        if len(df) > self.config.sample_size:
-            df = df.sample(
-                n=self.config.sample_size,
-                random_state=self.config.random_seed,
-            ).reset_index(drop=True)
-            logger.info(f"Sampled down to {len(df)} records")
-        else:
-            logger.info(f"Dataset has {len(df)} records (below sample target, using all)")
-
-        # Save raw data
-        ensure_dir(self.config.raw_data_path)
-        raw_path = self.config.raw_data_path / "reviews_raw.csv"
-        df.to_csv(raw_path, index=False)
-        logger.info(f"Raw data saved to {raw_path}")
-
-        # Basic cleaning before saving ingested version
-        # Drop rows with null or empty text
-        initial_count = len(df)
-        df = df.dropna(subset=["text"])
-        df = df[df["text"].str.strip().str.len() > 0]
-        dropped = initial_count - len(df)
-        if dropped > 0:
-            logger.info(f"Dropped {dropped} rows with null/empty text")
-
-        # Fill missing titles
-        df["title"] = df["title"].fillna("")
-
-        # Ensure rating is numeric
-        df["rating"] = pd.to_numeric(df["rating"], errors="coerce")
-        df = df.dropna(subset=["rating"])
-
-        # Ensure helpful_vote is numeric
-        df["helpful_vote"] = pd.to_numeric(df["helpful_vote"], errors="coerce").fillna(0).astype(int)
-
-        # Ensure verified_purchase is boolean
-        df["verified_purchase"] = df["verified_purchase"].astype(bool)
-
-        # Remove exact duplicates
-        before_dedup = len(df)
-        df = df.drop_duplicates(subset=["user_id", "text"]).reset_index(drop=True)
-        deduped = before_dedup - len(df)
-        if deduped > 0:
-            logger.info(f"Removed {deduped} duplicate reviews")
-
-        # Save ingested data
-        ensure_dir(self.config.ingested_data_path)
-        ingested_path = self.config.ingested_data_path / "reviews_ingested.csv"
-        df.to_csv(ingested_path, index=False)
-        logger.info(f"Ingested data saved to {ingested_path} ({len(df)} records)")
-
-        return ingested_path
+        out_path = self.output_dir / "reviews_ingested.csv"
+        df.to_csv(out_path, index=False)
+        logger.info("Saved ingested data to %s", out_path)
+        logger.info("=== Data Ingestion Complete ===")
+        return out_path
 
 
 if __name__ == "__main__":
     ingestion = DataIngestion()
-    path = ingestion.initiate_data_ingestion()
-    print(f"Data ingested at: {path}")
+    path = ingestion.ingest()
+    print(f"Data saved to: {path}")

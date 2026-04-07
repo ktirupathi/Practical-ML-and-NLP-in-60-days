@@ -1,81 +1,86 @@
-"""
-FastAPI application for the Multi-Label Document Classifier.
-Provides a /classify endpoint that returns predicted EUROVOC labels with confidence scores.
+"""FastAPI application for the Multi-label Document Classifier.
+
+POST /classify  {document_text: str, top_k: int = 5}
+  → {labels: [{label: str, confidence: float}]}
 """
 
+import logging
+import sys
+from pathlib import Path
 from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from src.pipeline.prediction_pipeline import PredictionPipeline
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
+logger = logging.getLogger(__name__)
+
 app = FastAPI(
-    title="Multi-Label Document Classifier",
+    title="Multi-label EU Document Classifier",
     description=(
-        "Classify EU legislative documents with multiple EUROVOC concept labels. "
-        "Based on EURLEX57K dataset with TF-IDF + OneVsRest/ClassifierChain models."
+        "Classifies EU legal documents with EUROVOC concept labels "
+        "using fine-tuned nlpaueb/legal-bert-base-uncased. "
+        "Binary cross-entropy loss; sigmoid + threshold 0.5 at inference."
     ),
     version="1.0.0",
 )
 
-# Lazy-load pipeline on first request
-_pipeline: PredictionPipeline = None
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+_pipeline: PredictionPipeline = PredictionPipeline()
 
 
-def get_pipeline() -> PredictionPipeline:
-    """Get or initialize the prediction pipeline (singleton)."""
-    global _pipeline
-    if _pipeline is None:
-        _pipeline = PredictionPipeline()
-    return _pipeline
+# ── Schemas ────────────────────────────────────────────────────────────────────
 
+class LabelScore(BaseModel):
+    """A single predicted label with its confidence score."""
+    label: str = Field(description="EUROVOC concept label string.")
+    confidence: float = Field(ge=0.0, le=1.0, description="Sigmoid probability.")
 
-# ──────────────────────────────────────────────
-# Request / Response schemas
-# ──────────────────────────────────────────────
 
 class ClassifyRequest(BaseModel):
-    text: str = Field(
+    """Request body for /classify."""
+    document_text: str = Field(
         ...,
         min_length=1,
-        description="Document text to classify.",
-        json_schema_extra={
-            "examples": [
-                "Council regulation on agricultural subsidies for olive oil production"
-            ]
-        },
+        description="Full text of the EU legal document to classify.",
+        examples=["Council regulation on agricultural subsidies for olive oil production in the Mediterranean."],
     )
+    top_k: int = Field(default=5, ge=1, le=100, description="Return at most top_k labels.")
     threshold: Optional[float] = Field(
-        default=0.5,
-        ge=0.0,
-        le=1.0,
-        description="Confidence threshold for label inclusion (0.0 to 1.0).",
-    )
-    top_k: Optional[int] = Field(
-        default=None,
-        ge=1,
-        description="Return only the top-k most confident labels.",
+        default=None, ge=0.0, le=1.0,
+        description="Sigmoid threshold override (default: 0.5 from training config).",
     )
 
 
 class ClassifyResponse(BaseModel):
-    labels: List[str] = Field(description="Predicted EUROVOC concept labels.")
-    scores: List[float] = Field(description="Confidence scores for each label.")
-    num_labels: int = Field(description="Number of predicted labels.")
+    """Response body for /classify."""
+    labels: List[LabelScore] = Field(description="Predicted EUROVOC labels sorted by confidence.")
 
 
 class BatchClassifyRequest(BaseModel):
-    texts: List[str] = Field(
-        ...,
-        min_length=1,
-        description="List of document texts to classify.",
-    )
-    threshold: Optional[float] = Field(default=0.5, ge=0.0, le=1.0)
-    top_k: Optional[int] = Field(default=None, ge=1)
+    """Request body for /classify/batch."""
+    documents: List[str] = Field(..., min_length=1, max_length=50,
+                                  description="List of document texts to classify.")
+    top_k: int = Field(default=5, ge=1, le=100)
+    threshold: Optional[float] = Field(default=None, ge=0.0, le=1.0)
 
 
 class BatchClassifyResponse(BaseModel):
+    """Response body for /classify/batch."""
     results: List[ClassifyResponse]
     total: int
 
@@ -85,61 +90,71 @@ class HealthResponse(BaseModel):
     model_loaded: bool
 
 
-# ──────────────────────────────────────────────
-# Endpoints
-# ──────────────────────────────────────────────
+# ── Endpoints ──────────────────────────────────────────────────────────────────
 
-@app.get("/health", response_model=HealthResponse)
-def health_check():
-    """Check if the service is running and model is loaded."""
-    pipeline = get_pipeline()
-    model_loaded = pipeline._model is not None
-    return HealthResponse(status="healthy", model_loaded=model_loaded)
+@app.get("/health", response_model=HealthResponse, tags=["Utility"])
+def health() -> HealthResponse:
+    """Return service health and model load status."""
+    return HealthResponse(status="healthy", model_loaded=_pipeline._model is not None)
 
 
-@app.post("/classify", response_model=ClassifyResponse)
-def classify_document(request: ClassifyRequest):
+@app.post("/classify", response_model=ClassifyResponse, tags=["Inference"])
+def classify(request: ClassifyRequest) -> ClassifyResponse:
+    """Classify a single EU legal document and return EUROVOC labels.
+
+    Args:
+        request: ClassifyRequest containing the document text and options.
+
+    Returns:
+        ClassifyResponse with a list of label + confidence pairs.
+
+    Raises:
+        HTTPException 400 if document_text is blank.
+        HTTPException 503 if model artefacts are missing.
+        HTTPException 500 on unexpected inference errors.
     """
-    Classify a single document and return predicted EUROVOC labels with confidence scores.
+    if not request.document_text.strip():
+        raise HTTPException(status_code=400, detail="document_text must not be blank.")
+    try:
+        result = _pipeline.predict(
+            request.document_text,
+            top_k=request.top_k,
+            threshold=request.threshold,
+        )
+        return ClassifyResponse(labels=[LabelScore(**ls) for ls in result["labels"]])
+    except FileNotFoundError as exc:
+        logger.error("Model artefacts missing: %s", exc)
+        raise HTTPException(status_code=503, detail="Model not loaded. Run train.py first.")
+    except Exception as exc:
+        logger.exception("Inference error: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Inference failed: {exc}")
+
+
+@app.post("/classify/batch", response_model=BatchClassifyResponse, tags=["Inference"])
+def classify_batch(request: BatchClassifyRequest) -> BatchClassifyResponse:
+    """Classify a batch of documents in a single request.
+
+    Args:
+        request: BatchClassifyRequest with a list of document texts.
+
+    Returns:
+        BatchClassifyResponse with per-document label predictions.
     """
     try:
-        pipeline = get_pipeline()
-        result = pipeline.predict(
-            text=request.text,
-            threshold=request.threshold,
-            top_k=request.top_k,
+        raw_results = _pipeline.predict_batch(
+            request.documents, top_k=request.top_k, threshold=request.threshold
         )
-        return ClassifyResponse(**result)
-    except FileNotFoundError as e:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Model artifacts not found. Train the model first. {e}",
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/classify/batch", response_model=BatchClassifyResponse)
-def classify_batch(request: BatchClassifyRequest):
-    """
-    Classify multiple documents in a single request.
-    """
-    try:
-        pipeline = get_pipeline()
-        results = pipeline.predict_batch(
-            texts=request.texts,
-            threshold=request.threshold,
-            top_k=request.top_k,
-        )
-        responses = [ClassifyResponse(**r) for r in results]
+        responses = [
+            ClassifyResponse(labels=[LabelScore(**ls) for ls in r["labels"]])
+            for r in raw_results
+        ]
         return BatchClassifyResponse(results=responses, total=len(responses))
-    except FileNotFoundError as e:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Model artifacts not found. Train the model first. {e}",
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except FileNotFoundError as exc:
+        logger.error("Model artefacts missing: %s", exc)
+        raise HTTPException(status_code=503, detail="Model not loaded. Run train.py first.")
+    except Exception as exc:
+        logger.exception("Batch inference error: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Batch inference failed: {exc}")
 
 
 if __name__ == "__main__":
