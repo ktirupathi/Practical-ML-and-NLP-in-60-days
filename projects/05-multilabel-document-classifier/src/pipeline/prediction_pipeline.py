@@ -1,151 +1,169 @@
+"""Prediction pipeline for multi-label EUR-Lex document classification.
+
+Loads the fine-tuned Legal-BERT model and predicts EUROVOC labels using
+sigmoid activation with a configurable threshold (default 0.5).
 """
-Prediction Pipeline
-Loads trained model and transforms new text to predict multiple labels with confidence scores.
-"""
 
-from typing import Dict, List, Tuple, Union
+import json
+import logging
+from pathlib import Path
+from typing import Dict, List, Optional
 
-import numpy as np
-import scipy.sparse as sp
+import joblib
+import torch
+import torch.nn as nn
+from transformers import AutoTokenizer
 
-from src.config.configuration import PredictionConfig
-from src.utils.common import get_logger, load_object, preprocess_text
+from src.components.model_trainer import LegalBertClassifier
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 class PredictionPipeline:
-    """Predict multiple labels for new documents with confidence scores."""
+    """Lazy-loading inference pipeline for Legal-BERT multi-label classifier.
 
-    def __init__(self, config: PredictionConfig = None):
-        self.config = config or PredictionConfig()
-        self._model = None
-        self._tfidf = None
-        self._mlb = None
+    Args:
+        model_dir: Directory containing best_model.pt, tokenizer/, label_names.pkl,
+            and model_config.json produced by ModelTrainer.
+        device: Torch device string, e.g. 'cpu', 'cuda', or 'auto'.
+    """
 
-    @property
-    def model(self):
-        if self._model is None:
-            logger.info("Loading model from %s", self.config.model_path)
-            self._model = load_object(self.config.model_path)
-        return self._model
-
-    @property
-    def tfidf(self):
-        if self._tfidf is None:
-            logger.info("Loading TF-IDF vectorizer from %s", self.config.tfidf_path)
-            self._tfidf = load_object(self.config.tfidf_path)
-        return self._tfidf
-
-    @property
-    def mlb(self):
-        if self._mlb is None:
-            logger.info("Loading MultiLabelBinarizer from %s", self.config.mlb_path)
-            self._mlb = load_object(self.config.mlb_path)
-        return self._mlb
-
-    def _get_confidence_scores(self, X: sp.csr_matrix) -> np.ndarray:
-        """
-        Extract confidence scores from the model.
-
-        For OneVsRestClassifier with LinearSVC, uses decision_function.
-        For ClassifierChain with LogisticRegression, uses predict_proba.
-        Falls back to binary predictions if neither is available.
-        """
-        if hasattr(self.model, "decision_function"):
-            scores = self.model.decision_function(X)
-            # Normalize decision function scores to [0, 1] range using sigmoid
-            scores = 1.0 / (1.0 + np.exp(-scores))
-            return scores
-        elif hasattr(self.model, "predict_proba"):
-            return self.model.predict_proba(X)
+    def __init__(
+        self,
+        model_dir: str = "artifacts/models",
+        device: str = "auto",
+    ):
+        self.model_dir = Path(model_dir)
+        if device == "auto":
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         else:
-            # Fallback: use binary predictions as scores
-            pred = self.model.predict(X)
-            if sp.issparse(pred):
-                return pred.toarray().astype(float)
-            return pred.astype(float)
+            self.device = torch.device(device)
+        self._model: Optional[LegalBertClassifier] = None
+        self._tokenizer = None
+        self._label_names: Optional[List[str]] = None
+        self._config: Optional[Dict] = None
+
+    # ── Lazy loaders ────────────────────────────────────────────────────────
+
+    def _load_artifacts(self) -> None:
+        """Load model, tokenizer, label names, and config from disk."""
+        config_path = self.model_dir / "model_config.json"
+        model_path = self.model_dir / "best_model.pt"
+        tokenizer_dir = self.model_dir / "tokenizer"
+        label_path = self.model_dir / "label_names.pkl"
+
+        for p in (config_path, model_path, tokenizer_dir, label_path):
+            if not p.exists():
+                raise FileNotFoundError(
+                    f"Artefact missing: {p}. Run train.py first."
+                )
+
+        self._config = json.loads(config_path.read_text())
+        self._label_names = joblib.load(label_path)
+
+        self._tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_dir))
+        num_labels = self._config["num_labels"]
+        model_name = self._config.get("model_name", "nlpaueb/legal-bert-base-uncased")
+
+        self._model = LegalBertClassifier(model_name, num_labels)
+        state = torch.load(model_path, map_location=self.device)
+        self._model.load_state_dict(state)
+        self._model.to(self.device)
+        self._model.eval()
+        logger.info("Loaded model (%d labels) from %s", num_labels, self.model_dir)
+
+    @property
+    def model(self) -> LegalBertClassifier:
+        if self._model is None:
+            self._load_artifacts()
+        return self._model  # type: ignore[return-value]
+
+    @property
+    def tokenizer(self):
+        if self._tokenizer is None:
+            self._load_artifacts()
+        return self._tokenizer
+
+    @property
+    def label_names(self) -> List[str]:
+        if self._label_names is None:
+            self._load_artifacts()
+        return self._label_names  # type: ignore[return-value]
+
+    @property
+    def config(self) -> Dict:
+        if self._config is None:
+            self._load_artifacts()
+        return self._config  # type: ignore[return-value]
+
+    # ── Inference ────────────────────────────────────────────────────────────
 
     def predict(
         self,
-        text: str,
-        threshold: float = None,
-        top_k: int = None,
-    ) -> Dict[str, Union[List[str], List[float], int]]:
-        """
-        Predict labels for a single document.
+        document_text: str,
+        top_k: int = 5,
+        threshold: Optional[float] = None,
+    ) -> Dict:
+        """Predict EUROVOC labels for a single document.
 
         Args:
-            text: Raw document text.
-            threshold: Confidence threshold for label inclusion (default: config value).
-            top_k: If set, return only the top-k labels by confidence.
+            document_text: Raw EU legal document text.
+            top_k: Return at most this many labels sorted by confidence.
+            threshold: Sigmoid threshold for positive prediction. Defaults to
+                the value stored in model_config.json (usually 0.5).
 
         Returns:
-            Dictionary with 'labels', 'scores', and 'num_labels'.
+            Dict with key 'labels': list of {label: str, confidence: float}.
         """
-        if threshold is None:
-            threshold = 0.5  # Default threshold for sigmoid-normalized scores
+        if not document_text.strip():
+            logger.warning("Empty document_text; returning empty label list.")
+            return {"labels": []}
 
-        # Preprocess and vectorize
-        cleaned = preprocess_text(text)
-        X = self.tfidf.transform([cleaned])
+        effective_threshold = threshold if threshold is not None else self.config.get("threshold", 0.5)
+        max_len = self.config.get("max_length", 512)
 
-        # Get confidence scores
-        scores = self._get_confidence_scores(X)
-        if scores.ndim == 1:
-            scores = scores.reshape(1, -1)
-        scores_flat = scores[0]
+        enc = self.tokenizer(
+            document_text,
+            max_length=max_len,
+            padding="max_length",
+            truncation=True,
+            return_tensors="pt",
+        )
+        input_ids = enc["input_ids"].to(self.device)
+        attention_mask = enc["attention_mask"].to(self.device)
 
-        # Get label names
-        label_names = list(self.mlb.classes_)
+        with torch.no_grad():
+            logits = self.model(input_ids, attention_mask)
+            probas = torch.sigmoid(logits).squeeze(0).cpu().numpy()
 
-        # Apply threshold
-        label_score_pairs = [
-            (label_names[i], float(scores_flat[i]))
-            for i in range(len(label_names))
-            if scores_flat[i] >= threshold
+        label_scores = [
+            {"label": name, "confidence": round(float(p), 4)}
+            for name, p in zip(self.label_names, probas)
+            if float(p) >= effective_threshold
         ]
+        label_scores.sort(key=lambda x: x["confidence"], reverse=True)
 
-        # Sort by confidence descending
-        label_score_pairs.sort(key=lambda x: x[1], reverse=True)
+        if top_k and len(label_scores) > top_k:
+            label_scores = label_scores[:top_k]
 
-        # Apply top_k if specified
-        if top_k is not None and top_k > 0:
-            label_score_pairs = label_score_pairs[:top_k]
-
-        labels = [pair[0] for pair in label_score_pairs]
-        scores_out = [round(pair[1], 4) for pair in label_score_pairs]
-
-        return {
-            "labels": labels,
-            "scores": scores_out,
-            "num_labels": len(labels),
-        }
+        logger.info("Document classified: %d labels above threshold %.2f",
+                    len(label_scores), effective_threshold)
+        return {"labels": label_scores}
 
     def predict_batch(
         self,
-        texts: List[str],
-        threshold: float = None,
-        top_k: int = None,
+        documents: List[str],
+        top_k: int = 5,
+        threshold: Optional[float] = None,
     ) -> List[Dict]:
-        """Predict labels for a batch of documents."""
-        results = []
-        for text in texts:
-            result = self.predict(text, threshold=threshold, top_k=top_k)
-            results.append(result)
-        return results
+        """Predict labels for a list of documents.
 
-    def predict_binary(self, text: str) -> Tuple[List[str], np.ndarray]:
+        Args:
+            documents: List of document text strings.
+            top_k: Max labels per document.
+            threshold: Override sigmoid threshold.
+
+        Returns:
+            List of prediction dicts.
         """
-        Predict using the model's native predict method (binary output).
-        Returns the predicted label names and the raw binary vector.
-        """
-        cleaned = preprocess_text(text)
-        X = self.tfidf.transform([cleaned])
-        y_pred = self.model.predict(X)
-
-        if sp.issparse(y_pred):
-            y_pred = y_pred.toarray()
-
-        predicted_labels = self.mlb.inverse_transform(y_pred)
-        return list(predicted_labels[0]), y_pred[0]
+        return [self.predict(doc, top_k=top_k, threshold=threshold) for doc in documents]

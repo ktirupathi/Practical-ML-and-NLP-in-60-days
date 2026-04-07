@@ -1,28 +1,35 @@
 """FastAPI application for email intent detection.
 
-Exposes a /detect-intent endpoint that accepts email subject and body
-and returns the predicted intent with confidence scores.
+POST /analyze-email  {email_text: str}
+  → {intent: str, confidence: float, keywords: list[str], suggested_action: str}
 """
 
 import logging
-from typing import Dict, Optional
+import sys
+from pathlib import Path
+from typing import List
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from src.pipeline.prediction_pipeline import PredictionPipeline
-from src.utils.common import setup_logger
+# Ensure project root is on sys.path when run directly
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-setup_logger(name="email_intent_api", log_dir="logs")
+from src.pipeline.prediction_pipeline import PredictionPipeline, VALID_INTENTS
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Email Intent Detection API",
     description=(
-        "Classifies corporate emails into intent categories: "
-        "request, inform, schedule, follow_up, complaint, inquiry, "
-        "approval, rejection."
+        "Classifies email text into one of: "
+        + ", ".join(VALID_INTENTS)
+        + ". Returns intent, confidence, keywords, and a suggested action."
     ),
     version="1.0.0",
 )
@@ -35,124 +42,102 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize prediction pipeline (lazy-loads model on first request)
-pipeline = PredictionPipeline()
+_pipeline: PredictionPipeline = PredictionPipeline()
 
 
-class EmailInput(BaseModel):
-    """Request schema for the /detect-intent endpoint."""
+# ── Request / Response schemas ─────────────────────────────────────────────────
 
-    subject: str = Field(
-        default="",
-        description="Email subject line.",
-        examples=["Meeting Tomorrow"],
-    )
-    body: str = Field(
-        default="",
-        description="Email body text.",
-        examples=["Please review the attached report and provide feedback by Friday."],
+class EmailAnalysisRequest(BaseModel):
+    """Request body for /analyze-email."""
+
+    email_text: str = Field(
+        ...,
+        min_length=1,
+        description="Raw email body text (headers optional).",
+        examples=["Please send me the latest budget report by Friday."],
     )
 
 
-class IntentResponse(BaseModel):
-    """Response schema for the /detect-intent endpoint."""
+class EmailAnalysisResponse(BaseModel):
+    """Response body for /analyze-email."""
 
     intent: str = Field(description="Predicted intent label.")
-    confidence: float = Field(description="Confidence score for the predicted intent.")
-    all_intents: Dict[str, float] = Field(
-        description="Probability scores for all intent classes."
-    )
+    confidence: float = Field(description="Model confidence score (0–1).")
+    keywords: List[str] = Field(description="Top keywords extracted from the email.")
+    suggested_action: str = Field(description="Recommended routing or handling action.")
 
 
-class BatchEmailInput(BaseModel):
-    """Request schema for batch predictions."""
+class BatchEmailRequest(BaseModel):
+    """Request body for /analyze-email/batch."""
 
-    emails: list[EmailInput] = Field(
-        description="List of emails to classify.",
-        min_length=1,
-        max_length=100,
+    emails: List[str] = Field(
+        ..., min_length=1, max_length=100,
+        description="List of raw email body texts to classify.",
     )
 
 
 class HealthResponse(BaseModel):
-    """Response schema for the /health endpoint."""
-
     status: str
     model_loaded: bool
 
 
-@app.get("/health", response_model=HealthResponse)
-def health_check():
-    """Check if the API and model are ready."""
-    model_loaded = pipeline._model is not None
-    return HealthResponse(status="healthy", model_loaded=model_loaded)
+# ── Endpoints ──────────────────────────────────────────────────────────────────
+
+@app.get("/health", response_model=HealthResponse, tags=["Utility"])
+def health() -> HealthResponse:
+    """Return service health and whether the model is pre-loaded."""
+    return HealthResponse(status="healthy", model_loaded=_pipeline._model is not None)
 
 
-@app.post("/detect-intent", response_model=IntentResponse)
-def detect_intent(email_input: EmailInput):
-    """Predict the intent of an email from its subject and body.
-
-    Args:
-        email_input: EmailInput with subject and body fields.
-
-    Returns:
-        IntentResponse with predicted intent, confidence, and all scores.
-    """
-    if not email_input.subject.strip() and not email_input.body.strip():
-        raise HTTPException(
-            status_code=400,
-            detail="At least one of 'subject' or 'body' must be non-empty.",
-        )
-
-    try:
-        result = pipeline.predict(
-            subject=email_input.subject,
-            body=email_input.body,
-        )
-        return IntentResponse(**result)
-    except FileNotFoundError as e:
-        logger.error("Model not found: %s", e)
-        raise HTTPException(
-            status_code=503,
-            detail="Model not loaded. Run the training pipeline first.",
-        )
-    except Exception as e:
-        logger.exception("Prediction error: %s", e)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Prediction failed: {str(e)}",
-        )
-
-
-@app.post("/detect-intent/batch", response_model=list[IntentResponse])
-def detect_intent_batch(batch_input: BatchEmailInput):
-    """Predict intents for a batch of emails.
+@app.post("/analyze-email", response_model=EmailAnalysisResponse, tags=["Inference"])
+def analyze_email(request: EmailAnalysisRequest) -> EmailAnalysisResponse:
+    """Classify the intent of an email from its raw text.
 
     Args:
-        batch_input: BatchEmailInput with a list of emails.
+        request: EmailAnalysisRequest containing the raw email body.
 
     Returns:
-        List of IntentResponse objects.
+        EmailAnalysisResponse with intent, confidence, keywords, and suggested_action.
+
+    Raises:
+        HTTPException 400 if email_text is blank.
+        HTTPException 503 if model artefacts are missing.
+        HTTPException 500 on unexpected inference errors.
+    """
+    if not request.email_text.strip():
+        raise HTTPException(status_code=400, detail="email_text must not be blank.")
+    try:
+        result = _pipeline.predict(request.email_text)
+        return EmailAnalysisResponse(**result)
+    except FileNotFoundError as exc:
+        logger.error("Model artefacts not found: %s", exc)
+        raise HTTPException(status_code=503, detail="Model not loaded. Run train.py first.")
+    except Exception as exc:
+        logger.exception("Inference error: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Inference failed: {exc}")
+
+
+@app.post("/analyze-email/batch", response_model=List[EmailAnalysisResponse], tags=["Inference"])
+def analyze_email_batch(request: BatchEmailRequest) -> List[EmailAnalysisResponse]:
+    """Classify a batch of emails in a single request.
+
+    Args:
+        request: BatchEmailRequest with a list of raw email texts.
+
+    Returns:
+        List of EmailAnalysisResponse objects in the same order.
     """
     try:
-        emails = [{"subject": e.subject, "body": e.body} for e in batch_input.emails]
-        results = pipeline.predict_batch(emails)
-        return [IntentResponse(**r) for r in results]
-    except FileNotFoundError as e:
-        logger.error("Model not found: %s", e)
-        raise HTTPException(
-            status_code=503,
-            detail="Model not loaded. Run the training pipeline first.",
-        )
-    except Exception as e:
-        logger.exception("Batch prediction error: %s", e)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Batch prediction failed: {str(e)}",
-        )
+        results = _pipeline.predict_batch(request.emails)
+        return [EmailAnalysisResponse(**r) for r in results]
+    except FileNotFoundError as exc:
+        logger.error("Model artefacts not found: %s", exc)
+        raise HTTPException(status_code=503, detail="Model not loaded. Run train.py first.")
+    except Exception as exc:
+        logger.exception("Batch inference error: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Batch inference failed: {exc}")
 
 
 if __name__ == "__main__":
     import uvicorn
-
     uvicorn.run(app, host="0.0.0.0", port=8000)
