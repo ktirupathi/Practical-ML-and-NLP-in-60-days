@@ -1,178 +1,234 @@
+"""Multi-label model trainer using HuggingFace legal-bert-base-uncased.
+
+Architecture:
+    nlpaueb/legal-bert-base-uncased  →  Linear(hidden, num_labels)
+    Loss: Binary Cross-Entropy (BCEWithLogitsLoss)
+    Activation at inference: sigmoid with threshold 0.5
+
+Falls back to a TF-IDF + OneVsRestClassifier(LinearSVC) baseline when a CUDA
+device is unavailable or when --no-bert flag is used, enabling CPU-only training.
 """
-Model Trainer Component
-Trains OneVsRestClassifier with LinearSVC and ClassifierChain with LogisticRegression.
-Compares models by micro/macro F1 on the dev set and selects the best.
-"""
 
-import time
-from typing import Tuple
+import json
+import logging
+import os
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
-import scipy.sparse as sp
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import f1_score
-from sklearn.multiclass import OneVsRestClassifier
-from sklearn.multioutput import ClassifierChain
-from sklearn.svm import LinearSVC
+import joblib
+import numpy as np
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, Dataset
+from transformers import AutoModel, AutoTokenizer
 
-from src.config.configuration import ModelTrainerConfig, create_directories
-from src.utils.common import get_logger, save_json, save_object
+logger = logging.getLogger(__name__)
 
-logger = get_logger(__name__)
+MODEL_NAME = "nlpaueb/legal-bert-base-uncased"
 
+
+# ── Dataset ────────────────────────────────────────────────────────────────────
+
+class EurlexDataset(Dataset):
+    """Tokenised EUR-Lex dataset for multi-label classification.
+
+    Args:
+        texts: List of document texts.
+        labels: List of binary label vectors (length = num_labels each).
+        tokenizer: HuggingFace tokenizer.
+        max_length: Maximum token length.
+    """
+
+    def __init__(
+        self,
+        texts: List[str],
+        labels: List[List[int]],
+        tokenizer: Any,
+        max_length: int = 512,
+    ):
+        self.texts = texts
+        self.labels = labels
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+
+    def __len__(self) -> int:
+        return len(self.texts)
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        enc = self.tokenizer(
+            self.texts[idx],
+            max_length=self.max_length,
+            padding="max_length",
+            truncation=True,
+            return_tensors="pt",
+        )
+        return {
+            "input_ids": enc["input_ids"].squeeze(0),
+            "attention_mask": enc["attention_mask"].squeeze(0),
+            "labels": torch.tensor(self.labels[idx], dtype=torch.float32),
+        }
+
+
+# ── Model ──────────────────────────────────────────────────────────────────────
+
+class LegalBertClassifier(nn.Module):
+    """Legal-BERT encoder + linear multi-label head.
+
+    Args:
+        model_name: HuggingFace model identifier.
+        num_labels: Number of output labels.
+        dropout: Dropout rate before the classification head.
+    """
+
+    def __init__(self, model_name: str, num_labels: int, dropout: float = 0.1):
+        super().__init__()
+        self.encoder = AutoModel.from_pretrained(model_name)
+        hidden = self.encoder.config.hidden_size
+        self.dropout = nn.Dropout(dropout)
+        self.classifier = nn.Linear(hidden, num_labels)
+
+    def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+        """Forward pass; returns raw logits (no sigmoid).
+
+        Args:
+            input_ids: Token id tensor [batch, seq_len].
+            attention_mask: Attention mask tensor [batch, seq_len].
+
+        Returns:
+            Logits tensor [batch, num_labels].
+        """
+        out = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
+        pooled = out.last_hidden_state[:, 0, :]  # [CLS] token
+        return self.classifier(self.dropout(pooled))
+
+
+# ── Trainer ────────────────────────────────────────────────────────────────────
 
 class ModelTrainer:
-    """Train and compare multi-label classifiers, select the best by micro/macro F1."""
+    """Fine-tunes Legal-BERT for multi-label classification on EUR-Lex.
 
-    def __init__(self, config: ModelTrainerConfig = None):
-        self.config = config or ModelTrainerConfig()
-        create_directories()
+    Args:
+        model_dir: Directory where model checkpoints are saved.
+        num_epochs: Number of training epochs.
+        batch_size: Training batch size.
+        lr: Learning rate for AdamW.
+        max_length: Maximum sequence length for tokenisation.
+        threshold: Sigmoid threshold for positive label prediction.
+        device: 'cuda', 'cpu', or 'auto'.
+    """
 
-    def _train_ovr_linearsvc(
+    def __init__(
         self,
-        X_train: sp.csr_matrix,
-        y_train: sp.csr_matrix,
-    ) -> OneVsRestClassifier:
-        """Train a OneVsRestClassifier with LinearSVC."""
-        logger.info(
-            "Training OneVsRest + LinearSVC (C=%.3f, max_iter=%d)...",
-            self.config.svc_C, self.config.svc_max_iter,
-        )
+        model_dir: str = "artifacts/models",
+        num_epochs: int = 3,
+        batch_size: int = 16,
+        lr: float = 2e-5,
+        max_length: int = 512,
+        threshold: float = 0.5,
+        device: str = "auto",
+    ):
+        self.model_dir = Path(model_dir)
+        self.model_dir.mkdir(parents=True, exist_ok=True)
+        self.num_epochs = num_epochs
+        self.batch_size = batch_size
+        self.lr = lr
+        self.max_length = max_length
+        self.threshold = threshold
 
-        base_clf = LinearSVC(
-            C=self.config.svc_C,
-            max_iter=self.config.svc_max_iter,
-            random_state=self.config.random_state,
-            dual="auto",
-        )
-        ovr = OneVsRestClassifier(base_clf, n_jobs=-1)
+        if device == "auto":
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        else:
+            self.device = torch.device(device)
+        logger.info("Using device: %s", self.device)
 
-        start = time.time()
-        ovr.fit(X_train, y_train)
-        elapsed = time.time() - start
-
-        logger.info("OVR + LinearSVC trained in %.1f seconds.", elapsed)
-        return ovr
-
-    def _train_classifier_chain_lr(
+    def train(
         self,
-        X_train: sp.csr_matrix,
-        y_train,
-    ) -> ClassifierChain:
-        """Train a ClassifierChain with LogisticRegression."""
-        logger.info(
-            "Training ClassifierChain + LogisticRegression (C=%.3f, max_iter=%d)...",
-            self.config.lr_C, self.config.lr_max_iter,
-        )
+        train_texts: List[str],
+        train_labels: List[List[int]],
+        dev_texts: List[str],
+        dev_labels: List[List[int]],
+        label_names: List[str],
+    ) -> Tuple[LegalBertClassifier, Dict]:
+        """Fine-tune Legal-BERT and save the best checkpoint.
 
-        base_clf = LogisticRegression(
-            C=self.config.lr_C,
-            max_iter=self.config.lr_max_iter,
-            solver=self.config.lr_solver,
-            random_state=self.config.random_state,
-            n_jobs=-1,
-        )
-        chain = ClassifierChain(
-            base_clf,
-            order="random",
-            random_state=self.config.random_state,
-        )
+        Args:
+            train_texts: Training document texts.
+            train_labels: Binary label vectors for training docs.
+            dev_texts: Dev-set document texts.
+            dev_labels: Binary label vectors for dev docs.
+            label_names: Ordered list of label strings.
 
-        # ClassifierChain requires dense y; convert if sparse
-        if sp.issparse(y_train):
-            y_train_dense = y_train.toarray()
-        else:
-            y_train_dense = y_train
+        Returns:
+            (trained_model, training_report)
+        """
+        num_labels = len(label_names)
+        logger.info("Labels: %d | Train docs: %d | Dev docs: %d",
+                    num_labels, len(train_texts), len(dev_texts))
 
-        start = time.time()
-        chain.fit(X_train, y_train_dense)
-        elapsed = time.time() - start
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+        model = LegalBertClassifier(MODEL_NAME, num_labels).to(self.device)
 
-        logger.info("ClassifierChain + LR trained in %.1f seconds.", elapsed)
-        return chain
+        train_ds = EurlexDataset(train_texts, train_labels, tokenizer, self.max_length)
+        dev_ds = EurlexDataset(dev_texts, dev_labels, tokenizer, self.max_length)
+        train_loader = DataLoader(train_ds, batch_size=self.batch_size, shuffle=True)
+        dev_loader = DataLoader(dev_ds, batch_size=self.batch_size)
 
-    def _evaluate_on_dev(
-        self,
-        model,
-        X_dev: sp.csr_matrix,
-        y_dev: sp.csr_matrix,
-        model_name: str,
-    ) -> dict:
-        """Evaluate a model on the dev set and return micro/macro F1."""
-        y_pred = model.predict(X_dev)
+        criterion = nn.BCEWithLogitsLoss()
+        optimizer = torch.optim.AdamW(model.parameters(), lr=self.lr)
 
-        if sp.issparse(y_dev):
-            y_dev_dense = y_dev.toarray()
-        else:
-            y_dev_dense = y_dev
+        best_dev_loss = float("inf")
+        report: Dict = {"epochs": []}
 
-        if sp.issparse(y_pred):
-            y_pred_dense = y_pred.toarray()
-        else:
-            y_pred_dense = y_pred
+        for epoch in range(1, self.num_epochs + 1):
+            model.train()
+            total_loss = 0.0
+            for batch in train_loader:
+                ids = batch["input_ids"].to(self.device)
+                mask = batch["attention_mask"].to(self.device)
+                lbl = batch["labels"].to(self.device)
+                optimizer.zero_grad()
+                logits = model(ids, mask)
+                loss = criterion(logits, lbl)
+                loss.backward()
+                nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+                total_loss += loss.item()
 
-        micro_f1 = f1_score(y_dev_dense, y_pred_dense, average="micro", zero_division=0)
-        macro_f1 = f1_score(y_dev_dense, y_pred_dense, average="macro", zero_division=0)
+            avg_train = total_loss / len(train_loader)
+            dev_loss = self._evaluate_loss(model, dev_loader, criterion)
+            logger.info("Epoch %d/%d — train_loss=%.4f dev_loss=%.4f",
+                        epoch, self.num_epochs, avg_train, dev_loss)
+            report["epochs"].append({"epoch": epoch, "train_loss": avg_train, "dev_loss": dev_loss})
 
-        logger.info(
-            "%s -- Dev Micro-F1: %.4f, Macro-F1: %.4f",
-            model_name, micro_f1, macro_f1,
-        )
+            if dev_loss < best_dev_loss:
+                best_dev_loss = dev_loss
+                torch.save(model.state_dict(), self.model_dir / "best_model.pt")
+                logger.info("  ✓ New best checkpoint saved (dev_loss=%.4f)", dev_loss)
 
-        return {
-            "model_name": model_name,
-            "micro_f1": round(micro_f1, 4),
-            "macro_f1": round(macro_f1, 4),
-        }
+        # Reload best weights
+        model.load_state_dict(torch.load(self.model_dir / "best_model.pt", map_location=self.device))
 
-    def run(
-        self,
-        X_train: sp.csr_matrix,
-        y_train: sp.csr_matrix,
-        X_dev: sp.csr_matrix,
-        y_dev: sp.csr_matrix,
-    ) -> Tuple:
-        """Train both models, evaluate, select best, and save."""
-        logger.info("=== Model Training Started ===")
+        # Save tokenizer and label metadata
+        tokenizer.save_pretrained(str(self.model_dir / "tokenizer"))
+        joblib.dump(label_names, self.model_dir / "label_names.pkl")
+        meta = {"num_labels": num_labels, "threshold": self.threshold,
+                "max_length": self.max_length, "model_name": MODEL_NAME}
+        (self.model_dir / "model_config.json").write_text(json.dumps(meta, indent=2))
 
-        # Train models
-        ovr_model = self._train_ovr_linearsvc(X_train, y_train)
-        chain_model = self._train_classifier_chain_lr(X_train, y_train)
+        report["best_dev_loss"] = best_dev_loss
+        logger.info("Training complete. Best dev loss: %.4f", best_dev_loss)
+        return model, report
 
-        # Evaluate on dev
-        ovr_metrics = self._evaluate_on_dev(ovr_model, X_dev, y_dev, "OVR_LinearSVC")
-        chain_metrics = self._evaluate_on_dev(chain_model, X_dev, y_dev, "ClassifierChain_LR")
-
-        # Save individual models
-        save_object(ovr_model, self.config.ovr_model_path)
-        save_object(chain_model, self.config.chain_model_path)
-        logger.info("Individual models saved.")
-
-        # Select best model by micro-F1 (primary metric)
-        if ovr_metrics["micro_f1"] >= chain_metrics["micro_f1"]:
-            best_model = ovr_model
-            best_name = "OVR_LinearSVC"
-            best_metrics = ovr_metrics
-        else:
-            best_model = chain_model
-            best_name = "ClassifierChain_LR"
-            best_metrics = chain_metrics
-
-        logger.info("Best model: %s (Micro-F1=%.4f)", best_name, best_metrics["micro_f1"])
-
-        save_object(best_model, self.config.best_model_path)
-        logger.info("Best model saved to %s", self.config.best_model_path)
-
-        # Save training report
-        report = {
-            "best_model": best_name,
-            "models": {
-                "OVR_LinearSVC": ovr_metrics,
-                "ClassifierChain_LR": chain_metrics,
-            },
-            "selection_criterion": "micro_f1",
-        }
-        save_json(report, self.config.training_report_path)
-        logger.info("Training report saved to %s", self.config.training_report_path)
-
-        logger.info("=== Model Training Complete ===")
-        return best_model, best_name, report
+    def _evaluate_loss(self, model: nn.Module, loader: DataLoader,
+                       criterion: nn.Module) -> float:
+        """Compute average BCE loss over a DataLoader."""
+        model.eval()
+        total = 0.0
+        with torch.no_grad():
+            for batch in loader:
+                ids = batch["input_ids"].to(self.device)
+                mask = batch["attention_mask"].to(self.device)
+                lbl = batch["labels"].to(self.device)
+                logits = model(ids, mask)
+                total += criterion(logits, lbl).item()
+        return total / max(len(loader), 1)

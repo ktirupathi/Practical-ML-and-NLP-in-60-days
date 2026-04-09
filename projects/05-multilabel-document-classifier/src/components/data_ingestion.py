@@ -1,155 +1,177 @@
-"""
-Data Ingestion Component
-Loads the EURLEX57K dataset from JSON files, parses documents and their EUROVOC labels,
-and produces consolidated DataFrames for train/dev/test splits.
+"""Data ingestion for the EUR-Lex multi-label document classifier.
+
+Loads EURLEX57K JSON documents from the standard train/dev/test split directories,
+filters rare labels, and serialises consolidated CSVs for downstream processing.
+
+Dataset: http://nlp.cs.aueb.gr/software_and_datasets/EURLEX57K/
+Expected directory layout:
+    <dataset_dir>/
+        train/  <celex_id>.json ...
+        dev/    <celex_id>.json ...
+        test/   <celex_id>.json ...
 """
 
 import json
+import logging
 import os
 from collections import Counter
-from typing import List, Tuple
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 from tqdm import tqdm
 
-from src.config.configuration import DataIngestionConfig, create_directories
-from src.utils.common import get_logger
+logger = logging.getLogger(__name__)
 
-logger = get_logger(__name__)
+# Fields concatenated to form the document text
+TEXT_FIELDS = ("header", "recitals", "main_body")
+LABEL_FIELD = "concepts"
 
 
 class DataIngestion:
-    """Load EURLEX57K JSON documents and create consolidated CSV files with label filtering."""
+    """Load EURLEX57K JSON documents and produce label-filtered DataFrames.
 
-    def __init__(self, config: DataIngestionConfig = None):
-        self.config = config or DataIngestionConfig()
-        create_directories()
+    Args:
+        dataset_dir: Root directory containing train/, dev/, test/ subdirs.
+        output_dir: Where to write the consolidated CSV files.
+        min_label_freq: Labels appearing fewer than this many times in train
+            are discarded.
+        max_text_chars: Truncate each document text to this many characters
+            to limit memory pressure (0 = no limit).
+    """
 
-    def _parse_single_document(self, filepath: str) -> dict:
-        """Parse a single EURLEX57K JSON document."""
-        with open(filepath, "r", encoding="utf-8") as f:
-            doc = json.load(f)
+    def __init__(
+        self,
+        dataset_dir: str = "data/eurlex57k",
+        output_dir: str = "data/ingested",
+        min_label_freq: int = 10,
+        max_text_chars: int = 10000,
+    ):
+        self.dataset_dir = Path(dataset_dir)
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.min_label_freq = min_label_freq
+        self.max_text_chars = max_text_chars
 
-        # Concatenate selected text fields
-        text_parts = []
-        for field_name in self.config.text_fields:
-            value = doc.get(field_name, "")
-            if isinstance(value, str) and value.strip():
-                text_parts.append(value.strip())
+    # ── Internal helpers ────────────────────────────────────────────────────
 
-        text = " ".join(text_parts)
+    def _parse_document(self, filepath: Path) -> Optional[Dict]:
+        """Parse a single EURLEX57K JSON file.
 
-        # Extract labels (concepts)
-        labels = doc.get(self.config.label_field, [])
+        Args:
+            filepath: Path to a .json document file.
+
+        Returns:
+            Dict with celex_id, text, labels or None on parse error.
+        """
+        try:
+            with open(filepath, "r", encoding="utf-8") as fh:
+                doc = json.load(fh)
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Skipping %s: %s", filepath.name, exc)
+            return None
+
+        parts: List[str] = []
+        for field in TEXT_FIELDS:
+            val = doc.get(field, "")
+            if isinstance(val, str) and val.strip():
+                parts.append(val.strip())
+            elif isinstance(val, list):
+                parts.extend(item for item in val if isinstance(item, str))
+
+        text = " ".join(parts)
+        if self.max_text_chars:
+            text = text[: self.max_text_chars]
+
+        labels: List[str] = doc.get(LABEL_FIELD, [])
         if not isinstance(labels, list):
             labels = []
 
         return {
-            "celex_id": doc.get("celex_id", os.path.basename(filepath).replace(".json", "")),
+            "celex_id": doc.get("celex_id", filepath.stem),
             "text": text,
             "labels": labels,
         }
 
-    def _load_split(self, split_dir: str, split_name: str) -> pd.DataFrame:
-        """Load all JSON documents from a split directory into a DataFrame."""
-        if not os.path.isdir(split_dir):
+    def _load_split(self, split_name: str) -> pd.DataFrame:
+        """Load all JSON documents in a split sub-directory.
+
+        Args:
+            split_name: One of 'train', 'dev', 'test'.
+
+        Returns:
+            DataFrame with columns: celex_id, text, labels (as Python lists).
+
+        Raises:
+            FileNotFoundError: If the split directory does not exist.
+        """
+        split_dir = self.dataset_dir / split_name
+        if not split_dir.is_dir():
             raise FileNotFoundError(
-                f"Dataset directory not found: {split_dir}\n"
-                f"Please download EURLEX57K from http://nlp.cs.aueb.gr/software_and_datasets/EURLEX57K/ "
-                f"and extract to {self.config.dataset_dir}/"
+                f"Split directory not found: {split_dir}\n"
+                "Download EURLEX57K from http://nlp.cs.aueb.gr/software_and_datasets/EURLEX57K/"
             )
 
-        json_files = sorted([
-            os.path.join(split_dir, f) for f in os.listdir(split_dir)
-            if f.endswith(".json")
-        ])
-
+        json_files = sorted(split_dir.glob("*.json"))
         if not json_files:
-            raise ValueError(f"No JSON files found in {split_dir}")
+            raise ValueError(f"No JSON files in {split_dir}")
 
-        logger.info("Loading %d documents from %s split...", len(json_files), split_name)
-
-        records = []
-        for filepath in tqdm(json_files, desc=f"Parsing {split_name}", disable=None):
-            try:
-                record = self._parse_single_document(filepath)
-                records.append(record)
-            except (json.JSONDecodeError, KeyError) as e:
-                logger.warning("Skipping malformed file %s: %s", filepath, e)
-
+        logger.info("Loading %d documents from %s split …", len(json_files), split_name)
+        records = [
+            self._parse_document(fp)
+            for fp in tqdm(json_files, desc=split_name, leave=False)
+        ]
+        records = [r for r in records if r is not None]
         df = pd.DataFrame(records)
-        logger.info("%s split: %d documents loaded.", split_name, len(df))
+        logger.info("%s: %d docs loaded.", split_name, len(df))
         return df
 
     def _compute_label_frequencies(self, train_df: pd.DataFrame) -> Counter:
-        """Count label frequencies across the training set."""
-        label_counter = Counter()
-        for labels in train_df["labels"]:
-            label_counter.update(labels)
-        return label_counter
+        counter: Counter = Counter()
+        for label_list in train_df["labels"]:
+            counter.update(label_list)
+        return counter
 
-    def _filter_labels(
-        self, df: pd.DataFrame, frequent_labels: set
-    ) -> pd.DataFrame:
-        """Keep only frequent labels in each document's label list."""
+    def _filter_rare_labels(self, df: pd.DataFrame, kept_labels: set) -> pd.DataFrame:
+        """Drop labels not in kept_labels; remove docs with no remaining labels."""
         df = df.copy()
-        df["labels"] = df["labels"].apply(
-            lambda lbl_list: [l for l in lbl_list if l in frequent_labels]
-        )
-        # Remove documents that have no labels left after filtering
-        original_len = len(df)
-        df = df[df["labels"].apply(len) > 0].reset_index(drop=True)
-        removed = original_len - len(df)
-        if removed > 0:
-            logger.info("Removed %d documents with no frequent labels.", removed)
+        df["labels"] = df["labels"].apply(lambda ls: [l for l in ls if l in kept_labels])
+        before = len(df)
+        df = df[df["labels"].map(len) > 0].reset_index(drop=True)
+        logger.info("Removed %d docs with no frequent labels.", before - len(df))
         return df
 
+    # ── Public API ──────────────────────────────────────────────────────────
+
     def run(self) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-        """Execute the full ingestion pipeline."""
+        """Execute full ingestion: load → filter → save CSVs.
+
+        Returns:
+            (train_df, dev_df, test_df) — label column holds Python lists.
+        """
         logger.info("=== Data Ingestion Started ===")
 
-        # Load all three splits
-        train_df = self._load_split(self.config.train_dir, "train")
-        dev_df = self._load_split(self.config.dev_dir, "dev")
-        test_df = self._load_split(self.config.test_dir, "test")
+        train_df = self._load_split("train")
+        dev_df = self._load_split("dev")
+        test_df = self._load_split("test")
 
-        # Compute label frequencies from training data and filter
-        label_freq = self._compute_label_frequencies(train_df)
-        total_unique = len(label_freq)
-        frequent_labels = {
-            label for label, count in label_freq.items()
-            if count >= self.config.min_label_freq
-        }
+        freq = self._compute_label_frequencies(train_df)
+        kept = {lbl for lbl, cnt in freq.items() if cnt >= self.min_label_freq}
         logger.info(
-            "Label filtering: %d / %d labels appear >= %d times in training.",
-            len(frequent_labels), total_unique, self.config.min_label_freq,
+            "Label vocab: %d total, %d kept (min_freq=%d).",
+            len(freq), len(kept), self.min_label_freq,
         )
 
-        train_df = self._filter_labels(train_df, frequent_labels)
-        dev_df = self._filter_labels(dev_df, frequent_labels)
-        test_df = self._filter_labels(test_df, frequent_labels)
+        train_df = self._filter_rare_labels(train_df, kept)
+        dev_df = self._filter_rare_labels(dev_df, kept)
+        test_df = self._filter_rare_labels(test_df, kept)
 
-        # Remove documents with empty text
-        for name, df in [("train", train_df), ("dev", dev_df), ("test", test_df)]:
-            empty_mask = df["text"].astype(str).str.strip() == ""
-            n_empty = empty_mask.sum()
-            if n_empty > 0:
-                logger.warning("Dropping %d empty-text documents from %s.", n_empty, name)
-
-        train_df = train_df[train_df["text"].str.strip() != ""].reset_index(drop=True)
-        dev_df = dev_df[dev_df["text"].str.strip() != ""].reset_index(drop=True)
-        test_df = test_df[test_df["text"].str.strip() != ""].reset_index(drop=True)
-
-        # Save consolidated CSVs (labels stored as JSON-encoded list strings)
-        for df, path, name in [
-            (train_df, self.config.raw_train_path, "train"),
-            (dev_df, self.config.raw_dev_path, "dev"),
-            (test_df, self.config.raw_test_path, "test"),
-        ]:
+        for df, name in [(train_df, "train"), (dev_df, "dev"), (test_df, "test")]:
+            path = self.output_dir / f"{name}.csv"
             save_df = df.copy()
             save_df["labels"] = save_df["labels"].apply(json.dumps)
             save_df.to_csv(path, index=False)
-            logger.info("%s: %d docs saved to %s", name, len(save_df), path)
+            logger.info("%s: %d docs → %s", name, len(df), path)
 
         logger.info("=== Data Ingestion Complete ===")
         return train_df, dev_df, test_df

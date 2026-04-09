@@ -1,118 +1,114 @@
-"""Model trainer component that trains LinearSVC, LogisticRegression,
-and MultinomialNB classifiers, comparing them by weighted F1 score."""
+"""Model trainer: TF-IDF + LinearSVC pipeline with calibrated confidence scores.
+
+Trains LinearSVC (primary), LogisticRegression, and MultinomialNB; selects the
+best by weighted F1; serialises the winner to disk.
+"""
 
 import logging
-import os
+from pathlib import Path
 from typing import Any, Dict, Tuple
 
+import joblib
 import numpy as np
-from sklearn.svm import LinearSVC
-from sklearn.linear_model import LogisticRegression
-from sklearn.naive_bayes import MultinomialNB
 from sklearn.calibration import CalibratedClassifierCV
-from sklearn.metrics import f1_score
-
-from src.config.configuration import ModelTrainerConfig
-from src.utils.common import create_directories, save_object
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import classification_report, f1_score
+from sklearn.naive_bayes import MultinomialNB
+from sklearn.svm import LinearSVC
 
 logger = logging.getLogger(__name__)
 
 
 class ModelTrainer:
-    """Trains multiple classifiers and selects the best one by weighted F1."""
+    """Train and compare classifiers; persist the best model."""
 
-    def __init__(self, config: ModelTrainerConfig):
-        self.config = config
-        create_directories([self.config.model_dir])
+    def __init__(
+        self,
+        model_dir: str = "artifacts/models",
+        random_state: int = 42,
+        min_f1_threshold: float = 0.60,
+    ):
+        self.model_dir = Path(model_dir)
+        self.model_dir.mkdir(parents=True, exist_ok=True)
+        self.random_state = random_state
+        self.min_f1_threshold = min_f1_threshold
 
-    def _get_models(self) -> Dict[str, Any]:
-        """Build a dictionary of model name to model instance.
+    def _build_candidates(self) -> Dict[str, Any]:
+        """Build candidate estimators.
 
-        LinearSVC is wrapped with CalibratedClassifierCV to enable
-        predict_proba for confidence scores in the prediction pipeline.
+        LinearSVC is wrapped in CalibratedClassifierCV so predict_proba is
+        available for confidence scores in the prediction pipeline.
 
         Returns:
-            Dictionary mapping model names to sklearn estimator instances.
+            Mapping of model name → sklearn estimator.
         """
-        models = {
+        return {
             "LinearSVC": CalibratedClassifierCV(
-                LinearSVC(
-                    C=1.0,
-                    max_iter=5000,
-                    class_weight="balanced",
-                    random_state=self.config.random_state,
-                ),
+                LinearSVC(C=1.0, max_iter=5000, class_weight="balanced",
+                          random_state=self.random_state),
                 cv=3,
             ),
             "LogisticRegression": LogisticRegression(
-                C=1.0,
-                max_iter=2000,
-                solver="lbfgs",
-                class_weight="balanced",
-                random_state=self.config.random_state,
+                C=1.0, max_iter=2000, solver="lbfgs",
+                class_weight="balanced", random_state=self.random_state,
             ),
             "MultinomialNB": MultinomialNB(alpha=1.0),
         }
-        return models
 
     def train(
         self,
-        X_train: np.ndarray,
-        X_test: np.ndarray,
+        X_train: Any,
+        X_test: Any,
         y_train: np.ndarray,
         y_test: np.ndarray,
     ) -> Tuple[Any, str, Dict[str, float]]:
-        """Train all models, evaluate on test set, and select the best.
+        """Train all candidates; evaluate on test set; persist the best model.
 
         Args:
-            X_train: Training feature matrix (TF-IDF sparse matrix).
-            X_test: Test feature matrix.
-            y_train: Training labels.
-            y_test: Test labels.
+            X_train: Sparse TF-IDF training matrix.
+            X_test: Sparse TF-IDF test matrix.
+            y_train: Training intent labels.
+            y_test: Test intent labels.
 
         Returns:
-            Tuple of (best_model, best_model_name, scores_dict).
+            (best_model, best_name, scores_dict)
         """
-        models = self._get_models()
+        candidates = self._build_candidates()
         scores: Dict[str, float] = {}
-        trained_models: Dict[str, Any] = {}
+        trained: Dict[str, Any] = {}
 
-        for name, model in models.items():
-            logger.info("Training %s...", name)
-            model.fit(X_train, y_train)
+        for name, model in candidates.items():
+            logger.info("Training %s …", name)
+            try:
+                model.fit(X_train, y_train)
+                y_pred = model.predict(X_test)
+                wf1 = f1_score(y_test, y_pred, average="weighted")
+                scores[name] = wf1
+                trained[name] = model
+                logger.info("%s — weighted F1: %.4f", name, wf1)
+                logger.debug("\n%s", classification_report(y_test, y_pred))
+            except Exception as exc:
+                logger.warning("Model %s failed to train: %s", name, exc)
 
-            y_pred = model.predict(X_test)
-            weighted_f1 = f1_score(y_test, y_pred, average="weighted")
-            scores[name] = weighted_f1
+        if not scores:
+            raise RuntimeError("All candidate models failed to train.")
 
-            trained_models[name] = model
-            logger.info("%s weighted F1: %.4f", name, weighted_f1)
-
-        # Select best model
-        best_name = max(scores, key=scores.get)
-        best_model = trained_models[best_name]
+        best_name = max(scores, key=scores.__getitem__)
+        best_model = trained[best_name]
         best_score = scores[best_name]
+        logger.info("Best model: %s (weighted F1=%.4f)", best_name, best_score)
 
-        logger.info(
-            "Best model: %s with weighted F1 = %.4f", best_name, best_score
-        )
-
-        # Check minimum threshold
-        if best_score < self.config.min_f1_threshold:
+        if best_score < self.min_f1_threshold:
             logger.warning(
-                "Best F1 score (%.4f) is below threshold (%.4f). "
-                "Model may not be production-ready.",
-                best_score,
-                self.config.min_f1_threshold,
+                "Best F1 %.4f is below threshold %.4f — model may not be production-ready.",
+                best_score, self.min_f1_threshold,
             )
 
-        # Save the best model
-        model_path = os.path.join(self.config.model_dir, "best_model.pkl")
-        save_object(best_model, model_path)
-        logger.info("Saved best model (%s) to %s", best_name, model_path)
+        model_path = self.model_dir / "best_model.pkl"
+        joblib.dump(best_model, model_path)
+        logger.info("Saved best model to %s", model_path)
 
-        # Save all models for comparison
-        all_models_path = os.path.join(self.config.model_dir, "all_models.pkl")
-        save_object(trained_models, all_models_path)
+        all_path = self.model_dir / "all_models.pkl"
+        joblib.dump(trained, all_path)
 
         return best_model, best_name, scores

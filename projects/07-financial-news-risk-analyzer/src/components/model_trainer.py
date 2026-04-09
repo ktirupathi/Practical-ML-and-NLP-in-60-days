@@ -1,11 +1,31 @@
-"""Model trainer component: fine-tunes FinBERT/DistilBERT using HuggingFace Trainer."""
+"""
+Model Trainer for Financial News Risk Analyzer.
 
+Fine-tunes ProsusAI/finbert (or any HuggingFace classification model) for
+3-class financial sentiment (negative / neutral / positive) using the
+HuggingFace Trainer API.
+
+Key design decisions:
+- Optional inverse-frequency class-weighted CrossEntropyLoss to handle
+  label imbalance in Financial PhraseBank.
+- Early-stopping callback to prevent over-fitting on the small dataset.
+- Saves the best checkpoint and a JSON metrics summary to disk.
+"""
+
+import json
 import os
+from dataclasses import dataclass
 from typing import Dict, Optional
 
 import numpy as np
 import torch
-from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
+from sklearn.metrics import (
+    accuracy_score,
+    classification_report,
+    f1_score,
+    precision_score,
+    recall_score,
+)
 from transformers import (
     AutoModelForSequenceClassification,
     EarlyStoppingCallback,
@@ -19,73 +39,90 @@ from src.utils.common import get_device, save_json, set_seed, setup_logger
 
 logger = setup_logger("model_trainer")
 
+# Label ordering expected by Financial PhraseBank (0=neg, 1=neu, 2=pos)
+ID2LABEL = {0: "negative", 1: "neutral", 2: "positive"}
+LABEL2ID = {v: k for k, v in ID2LABEL.items()}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Metric computation
+# ─────────────────────────────────────────────────────────────────────────────
+
 
 def compute_metrics(eval_pred) -> Dict[str, float]:
-    """Compute classification metrics for the Trainer.
-
-    Args:
-        eval_pred: EvalPrediction with predictions and label_ids.
-
-    Returns:
-        Dictionary of metric name to value.
-    """
+    """Compute classification metrics called by the Trainer at each eval step."""
     logits, labels = eval_pred
-    predictions = np.argmax(logits, axis=-1)
-
+    preds = np.argmax(logits, axis=-1)
     return {
-        "accuracy": accuracy_score(labels, predictions),
-        "f1": f1_score(labels, predictions, average="macro"),
-        "f1_weighted": f1_score(labels, predictions, average="weighted"),
-        "precision": precision_score(labels, predictions, average="macro"),
-        "recall": recall_score(labels, predictions, average="macro"),
+        "accuracy": accuracy_score(labels, preds),
+        "f1_macro": f1_score(labels, preds, average="macro", zero_division=0),
+        "f1_weighted": f1_score(labels, preds, average="weighted", zero_division=0),
+        "precision_macro": precision_score(labels, preds, average="macro", zero_division=0),
+        "recall_macro": recall_score(labels, preds, average="macro", zero_division=0),
     }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Trainer artifact
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class ModelTrainerArtifact:
+    model_path: str
+    tokenizer_path: str
+    train_metrics: Dict
+    eval_metrics: Dict
+    classification_report: str
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ModelTrainer
+# ─────────────────────────────────────────────────────────────────────────────
+
+
 class ModelTrainer:
-    """Fine-tunes a pretrained transformer model for financial sentiment."""
+    """
+    Fine-tunes a pretrained transformer for financial sentiment classification.
+
+    Usage:
+        trainer = ModelTrainer(config)
+        artifact = trainer.run(train_ds, val_ds, test_ds)
+    """
 
     def __init__(self, config: ModelTrainerConfig):
         self.config = config
-        self.model = None
-        self.trainer = None
+        self.model: Optional[AutoModelForSequenceClassification] = None
+        self.trainer: Optional[Trainer] = None
+
+    # ------------------------------------------------------------------
+    # Model loading
+    # ------------------------------------------------------------------
 
     def load_model(self) -> AutoModelForSequenceClassification:
-        """Load pretrained model with a classification head.
-
-        Returns:
-            Model ready for fine-tuning.
-        """
+        """Load pretrained transformer with a 3-class classification head."""
         logger.info(
-            "Loading model '%s' with %d labels",
+            "Loading pretrained model '%s' with %d labels ...",
             self.config.model_name,
             self.config.num_labels,
         )
-
         self.model = AutoModelForSequenceClassification.from_pretrained(
             self.config.model_name,
             num_labels=self.config.num_labels,
+            id2label=ID2LABEL,
+            label2id=LABEL2ID,
             ignore_mismatched_sizes=True,
         )
-
-        # Log model size
-        total_params = sum(p.numel() for p in self.model.parameters())
-        trainable_params = sum(
-            p.numel() for p in self.model.parameters() if p.requires_grad
-        )
-        logger.info(
-            "Model loaded. Total params: %s, Trainable: %s",
-            f"{total_params:,}",
-            f"{trainable_params:,}",
-        )
-
+        total = sum(p.numel() for p in self.model.parameters())
+        trainable = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        logger.info("Params — total: %s | trainable: %s", f"{total:,}", f"{trainable:,}")
         return self.model
 
-    def _build_training_args(self) -> TrainingArguments:
-        """Build TrainingArguments from config.
+    # ------------------------------------------------------------------
+    # Training-args builder
+    # ------------------------------------------------------------------
 
-        Returns:
-            Configured TrainingArguments.
-        """
+    def _build_training_args(self) -> TrainingArguments:
         return TrainingArguments(
             output_dir=self.config.output_dir,
             num_train_epochs=self.config.num_epochs,
@@ -109,44 +146,54 @@ class ModelTrainer:
             seed=42,
         )
 
+    # ------------------------------------------------------------------
+    # Class-weight helper
+    # ------------------------------------------------------------------
+
+    def compute_class_weights(self, labels) -> torch.Tensor:
+        """Inverse-frequency class weights for imbalanced labels."""
+        labels_arr = np.array(labels)
+        classes = np.unique(labels_arr)
+        n_total = len(labels_arr)
+        weights = []
+        for cls in sorted(classes):
+            count = (labels_arr == cls).sum()
+            weights.append(n_total / (len(classes) * max(count, 1)))
+        tensor = torch.tensor(weights, dtype=torch.float32)
+        logger.info("Class weights: %s", tensor.tolist())
+        return tensor
+
+    # ------------------------------------------------------------------
+    # Training
+    # ------------------------------------------------------------------
+
     def train(
         self,
         train_dataset: FinancialSentimentDataset,
         val_dataset: FinancialSentimentDataset,
         class_weights: Optional[torch.Tensor] = None,
-    ) -> Dict[str, float]:
-        """Fine-tune the model.
-
-        Args:
-            train_dataset: Training dataset.
-            val_dataset: Validation dataset.
-            class_weights: Optional tensor of class weights for imbalanced data.
-
-        Returns:
-            Training metrics dictionary.
-        """
+    ) -> Dict:
+        """Fine-tune the model on train_dataset, evaluate on val_dataset."""
         if self.model is None:
             self.load_model()
 
         set_seed(42)
         training_args = self._build_training_args()
 
-        # Build trainer with optional weighted loss
+        # Build (optionally weighted) Trainer sub-class
         if class_weights is not None:
             device = get_device()
-            class_weights = class_weights.to(device)
+            _weights = class_weights.to(device)
 
             class WeightedTrainer(Trainer):
                 def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
                     labels = inputs.pop("labels")
                     outputs = model(**inputs)
-                    logits = outputs.logits
-                    loss_fn = torch.nn.CrossEntropyLoss(weight=class_weights)
-                    loss = loss_fn(logits, labels)
+                    loss_fn = torch.nn.CrossEntropyLoss(weight=_weights)
+                    loss = loss_fn(outputs.logits, labels)
                     return (loss, outputs) if return_outputs else loss
 
             trainer_cls = WeightedTrainer
-            logger.info("Using weighted loss with weights: %s", class_weights)
         else:
             trainer_cls = Trainer
 
@@ -166,73 +213,59 @@ class ModelTrainer:
             callbacks=callbacks,
         )
 
-        logger.info("Starting training for %d epochs", self.config.num_epochs)
+        logger.info("Starting training — epochs: %d", self.config.num_epochs)
         train_result = self.trainer.train()
+        logger.info("Training complete. Metrics: %s", train_result.metrics)
+        return train_result.metrics
 
-        # Log results
-        metrics = train_result.metrics
-        logger.info("Training complete. Metrics: %s", metrics)
+    # ------------------------------------------------------------------
+    # Evaluation
+    # ------------------------------------------------------------------
 
-        return metrics
-
-    def evaluate(
-        self, test_dataset: FinancialSentimentDataset
-    ) -> Dict[str, float]:
-        """Evaluate the model on a test dataset.
-
-        Args:
-            test_dataset: Test dataset.
-
-        Returns:
-            Evaluation metrics dictionary.
-        """
+    def evaluate(self, test_dataset: FinancialSentimentDataset) -> Dict:
+        """Run final evaluation on the held-out test set."""
         if self.trainer is None:
-            raise RuntimeError("Model must be trained before evaluation")
-
-        logger.info("Evaluating on %d samples", len(test_dataset))
+            raise RuntimeError("Call train() before evaluate().")
+        logger.info("Running test-set evaluation on %d samples ...", len(test_dataset))
         metrics = self.trainer.evaluate(test_dataset)
-        logger.info("Evaluation metrics: %s", metrics)
+        logger.info("Test metrics: %s", metrics)
         return metrics
+
+    def generate_classification_report(
+        self, test_dataset: FinancialSentimentDataset
+    ) -> str:
+        """Generate a full per-class classification report."""
+        if self.trainer is None:
+            raise RuntimeError("Call train() before generating the report.")
+
+        preds_output = self.trainer.predict(test_dataset)
+        preds = np.argmax(preds_output.predictions, axis=-1)
+        labels = preds_output.label_ids
+
+        report = classification_report(
+            labels,
+            preds,
+            target_names=list(ID2LABEL.values()),
+            digits=4,
+        )
+        logger.info("Classification report:\n%s", report)
+        return report
+
+    # ------------------------------------------------------------------
+    # Save
+    # ------------------------------------------------------------------
 
     def save_model(self, path: Optional[str] = None) -> str:
-        """Save the fine-tuned model and tokenizer.
-
-        Args:
-            path: Optional custom save path.
-
-        Returns:
-            Path where model was saved.
-        """
-        save_path = path or os.path.join(self.config.output_dir, "best")
+        """Save the fine-tuned model and tokenizer."""
+        save_path = path or os.path.join(self.config.output_dir, "best_model")
         os.makedirs(save_path, exist_ok=True)
-
         self.trainer.save_model(save_path)
-        logger.info("Model saved to %s", save_path)
+        logger.info("Model saved → %s", save_path)
         return save_path
 
-    def compute_class_weights(
-        self, labels: list
-    ) -> torch.Tensor:
-        """Compute inverse-frequency class weights.
-
-        Args:
-            labels: List of integer labels.
-
-        Returns:
-            Tensor of class weights.
-        """
-        labels_np = np.array(labels)
-        classes = np.unique(labels_np)
-        total = len(labels_np)
-        weights = []
-
-        for cls in sorted(classes):
-            count = (labels_np == cls).sum()
-            weights.append(total / (len(classes) * count))
-
-        weights_tensor = torch.tensor(weights, dtype=torch.float32)
-        logger.info("Computed class weights: %s", weights_tensor)
-        return weights_tensor
+    # ------------------------------------------------------------------
+    # Full pipeline
+    # ------------------------------------------------------------------
 
     def run(
         self,
@@ -240,35 +273,45 @@ class ModelTrainer:
         val_dataset: FinancialSentimentDataset,
         test_dataset: FinancialSentimentDataset,
         use_class_weights: bool = True,
-    ) -> Dict[str, float]:
-        """Execute the full training pipeline.
-
-        Args:
-            train_dataset: Training dataset.
-            val_dataset: Validation dataset.
-            test_dataset: Test dataset for final evaluation.
-            use_class_weights: Whether to use inverse-frequency class weights.
+    ) -> ModelTrainerArtifact:
+        """
+        Execute the complete training pipeline.
 
         Returns:
-            Test evaluation metrics.
+            ModelTrainerArtifact with paths and metric summaries.
         """
-        logger.info("Starting model training pipeline")
+        logger.info("=" * 60)
+        logger.info("Starting Model Training Pipeline")
+        logger.info("=" * 60)
+
         self.load_model()
 
-        class_weights = None
+        cw = None
         if use_class_weights:
-            class_weights = self.compute_class_weights(train_dataset.labels)
+            cw = self.compute_class_weights(train_dataset.labels)
 
-        self.train(train_dataset, val_dataset, class_weights)
+        train_metrics = self.train(train_dataset, val_dataset, cw)
+        eval_metrics = self.evaluate(test_dataset)
+        report = self.generate_classification_report(test_dataset)
 
-        test_metrics = self.evaluate(test_dataset)
         model_path = self.save_model()
 
-        # Save metrics
+        # Persist metrics
         metrics_path = os.path.join(self.config.output_dir, "training_metrics.json")
-        save_json(test_metrics, metrics_path)
-
-        logger.info(
-            "Training pipeline complete. Model saved to %s", model_path
+        save_json(
+            {
+                "train": train_metrics,
+                "eval": eval_metrics,
+                "classification_report": report,
+            },
+            metrics_path,
         )
-        return test_metrics
+
+        logger.info("Training pipeline complete. Model → %s", model_path)
+        return ModelTrainerArtifact(
+            model_path=model_path,
+            tokenizer_path=model_path,   # tokenizer saved alongside model
+            train_metrics=train_metrics,
+            eval_metrics=eval_metrics,
+            classification_report=report,
+        )

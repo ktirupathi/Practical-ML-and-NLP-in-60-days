@@ -1,185 +1,170 @@
-"""Data transformation component for email-specific text preprocessing
-and TF-IDF vectorization."""
+"""Data transformation component: email-specific text preprocessing and TF-IDF vectorization.
+
+Handles header removal, HTML stripping, quoted-text removal, and produces
+a train/test split with a fitted TfidfVectorizer saved to disk.
+"""
 
 import logging
 import os
 import re
-from typing import Tuple
+from pathlib import Path
+from typing import List, Tuple
 
+import joblib
 import numpy as np
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.model_selection import train_test_split
 
-from src.config.configuration import DataTransformationConfig
-from src.utils.common import create_directories, save_object
-
 logger = logging.getLogger(__name__)
 
-# Patterns for cleaning email-specific noise.
-FORWARDED_HEADER_PATTERN = re.compile(
-    r"-{2,}\s*Forwarded by.*?-{2,}", re.DOTALL | re.IGNORECASE
-)
-ORIGINAL_MESSAGE_PATTERN = re.compile(
-    r"-{2,}\s*Original Message\s*-{2,}.*", re.DOTALL | re.IGNORECASE
-)
-REPLY_QUOTE_PATTERN = re.compile(r"^>.*$", re.MULTILINE)
-EMAIL_ADDRESS_PATTERN = re.compile(r"\S+@\S+\.\S+")
-URL_PATTERN = re.compile(r"https?://\S+|www\.\S+")
-PHONE_PATTERN = re.compile(r"\b\d{3}[-.]?\d{3}[-.]?\d{4}\b")
-SIGNATURE_SEPARATORS = re.compile(
-    r"(?:^|\n)[-_=]{2,}\s*\n.*", re.DOTALL
-)
-LEGAL_DISCLAIMER_PATTERN = re.compile(
+# --- Compiled cleaning patterns ---
+_FORWARDED = re.compile(r"-{2,}\s*Forwarded by.*?-{2,}", re.DOTALL | re.IGNORECASE)
+_ORIGINAL_MSG = re.compile(r"-{2,}\s*Original Message\s*-{2,}.*", re.DOTALL | re.IGNORECASE)
+_QUOTED_LINES = re.compile(r"^>.*$", re.MULTILINE)
+_HTML_TAG = re.compile(r"<[^>]+>")
+_EMAIL_ADDR = re.compile(r"\S+@\S+\.\S+")
+_URL = re.compile(r"https?://\S+|www\.\S+")
+_PHONE = re.compile(r"\b\d{3}[-.]?\d{3}[-.]?\d{4}\b")
+_LEGAL = re.compile(
     r"(?:this email|this message|this communication)\s+(?:is\s+)?(?:intended|confidential|privileged).*",
     re.DOTALL | re.IGNORECASE,
 )
-MULTIPLE_NEWLINES = re.compile(r"\n{3,}")
-MULTIPLE_SPACES = re.compile(r" {2,}")
+_SIG_SEP = re.compile(r"(?:^|\n)[-_=]{3,}\s*\n.*", re.DOTALL)
+_MULTI_NL = re.compile(r"\n{3,}")
+_MULTI_SP = re.compile(r" {2,}")
+
+
+def clean_email_text(text: str) -> str:
+    """Apply email-specific cleaning: remove headers, HTML, signatures, noise.
+
+    Args:
+        text: Raw email body or subject.
+
+    Returns:
+        Normalised plain text.
+    """
+    if not isinstance(text, str):
+        return ""
+    text = _FORWARDED.sub(" ", text)
+    text = _ORIGINAL_MSG.sub(" ", text)
+    text = _QUOTED_LINES.sub("", text)
+    text = _HTML_TAG.sub(" ", text)
+    text = _LEGAL.sub("", text)
+    text = _SIG_SEP.sub("", text)
+    text = _EMAIL_ADDR.sub(" ", text)
+    text = _URL.sub(" ", text)
+    text = _PHONE.sub(" ", text)
+    text = re.sub(r"[^a-zA-Z0-9\s.,!?;:'\"-]", " ", text)
+    text = _MULTI_NL.sub("\n", text)
+    text = _MULTI_SP.sub(" ", text)
+    return text.strip()
+
+
+def extract_keywords(text: str, top_n: int = 5) -> List[str]:
+    """Extract simple keyword hints from cleaned text using token frequency.
+
+    Args:
+        text: Cleaned email text.
+        top_n: Maximum number of keywords to return.
+
+    Returns:
+        List of keyword strings.
+    """
+    stopwords = {
+        "the", "a", "an", "is", "it", "in", "on", "at", "to", "for",
+        "of", "and", "or", "be", "was", "are", "will", "i", "you", "we",
+        "this", "that", "have", "has", "had", "with", "from", "by", "as",
+        "not", "do", "but", "if", "so", "my", "your", "our", "can", "would",
+        "could", "please", "just", "also", "up", "all", "any", "more",
+    }
+    tokens = re.findall(r"\b[a-z]{4,}\b", text.lower())
+    freq: dict = {}
+    for tok in tokens:
+        if tok not in stopwords:
+            freq[tok] = freq.get(tok, 0) + 1
+    return sorted(freq, key=freq.get, reverse=True)[:top_n]  # type: ignore[arg-type]
 
 
 class DataTransformation:
-    """Handles email-specific text preprocessing and TF-IDF vectorization."""
+    """Combines, cleans, and vectorizes email text for intent classification."""
 
-    def __init__(self, config: DataTransformationConfig):
-        self.config = config
-        create_directories([self.config.transformed_data_dir])
-
-    def clean_email_text(self, text: str) -> str:
-        """Apply email-specific cleaning to remove headers, signatures,
-        quoted text, and other noise.
-
-        Args:
-            text: Raw email body text.
-
-        Returns:
-            Cleaned text string.
-        """
-        if not isinstance(text, str):
-            return ""
-
-        # Remove forwarded message headers and content after "Original Message"
-        text = FORWARDED_HEADER_PATTERN.sub(" ", text)
-        text = ORIGINAL_MESSAGE_PATTERN.sub(" ", text)
-
-        # Remove quoted reply lines (lines starting with >)
-        text = REPLY_QUOTE_PATTERN.sub("", text)
-
-        # Remove legal disclaimers
-        text = LEGAL_DISCLAIMER_PATTERN.sub("", text)
-
-        # Remove signature blocks (text after separator lines)
-        text = SIGNATURE_SEPARATORS.sub("", text)
-
-        # Remove email addresses, URLs, phone numbers
-        text = EMAIL_ADDRESS_PATTERN.sub(" ", text)
-        text = URL_PATTERN.sub(" ", text)
-        text = PHONE_PATTERN.sub(" ", text)
-
-        # Remove non-alphanumeric characters except basic punctuation
-        text = re.sub(r"[^a-zA-Z0-9\s.,!?;:'\"-]", " ", text)
-
-        # Normalize whitespace
-        text = MULTIPLE_NEWLINES.sub("\n", text)
-        text = MULTIPLE_SPACES.sub(" ", text)
-
-        return text.strip()
+    def __init__(
+        self,
+        output_dir: str = "artifacts/transformed",
+        test_size: float = 0.2,
+        random_state: int = 42,
+        max_features: int = 30000,
+        ngram_range: Tuple[int, int] = (1, 2),
+        min_df: int = 2,
+        max_df: float = 0.95,
+    ):
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.test_size = test_size
+        self.random_state = random_state
+        self.max_features = max_features
+        self.ngram_range = ngram_range
+        self.min_df = min_df
+        self.max_df = max_df
 
     def combine_subject_body(self, subject: str, body: str) -> str:
-        """Combine email subject and body into a single text field
-        with subject given extra weight by prepending it.
+        """Combine subject (double-weighted) and body into one cleaned string.
 
         Args:
             subject: Email subject line.
             body: Email body text.
 
         Returns:
-            Combined and cleaned text.
+            Cleaned, combined text.
         """
-        subject = str(subject) if pd.notna(subject) else ""
-        body = str(body) if pd.notna(body) else ""
-
-        subject_clean = self.clean_email_text(subject)
-        body_clean = self.clean_email_text(body)
-
-        # Repeat subject to give it more weight in TF-IDF
-        combined = f"{subject_clean} {subject_clean} {body_clean}"
-        return combined.strip()
+        subj = clean_email_text(str(subject) if pd.notna(subject) else "")
+        bd = clean_email_text(str(body) if pd.notna(body) else "")
+        return f"{subj} {subj} {bd}".strip()
 
     def transform(
         self, df: pd.DataFrame
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, TfidfVectorizer]:
-        """Run the full transformation pipeline.
-
-        1. Combine and clean subject + body text.
-        2. Train/test split (stratified).
-        3. Fit TF-IDF vectorizer on training data.
-        4. Transform both splits.
-        5. Save vectorizer to disk.
+    ) -> Tuple[object, object, np.ndarray, np.ndarray, TfidfVectorizer]:
+        """Run full transformation: clean → split → fit TF-IDF → save vectorizer.
 
         Args:
-            df: DataFrame with 'subject', 'body', and 'intent' columns.
+            df: DataFrame with columns subject, body, intent.
 
         Returns:
-            Tuple of (X_train, X_test, y_train, y_test, vectorizer).
+            (X_train_tfidf, X_test_tfidf, y_train, y_test, vectorizer)
         """
-        logger.info("Starting data transformation on %d samples.", len(df))
-
-        # Combine subject and body into a single text column
+        logger.info("Starting transformation on %d samples.", len(df))
         df = df.copy()
         df["text"] = df.apply(
-            lambda row: self.combine_subject_body(row["subject"], row["body"]),
+            lambda r: self.combine_subject_body(r.get("subject", ""), r.get("body", "")),
             axis=1,
         )
+        mask = df["text"].str.strip().eq("")
+        if mask.any():
+            logger.warning("Dropping %d empty-text rows.", mask.sum())
+            df = df[~mask].reset_index(drop=True)
 
-        # Remove rows with empty text after cleaning
-        empty_mask = df["text"].str.strip().eq("")
-        if empty_mask.any():
-            logger.warning(
-                "Dropping %d rows with empty text after cleaning.", empty_mask.sum()
-            )
-            df = df[~empty_mask].reset_index(drop=True)
-
-        X = df["text"].values
-        y = df["intent"].values
-
-        logger.info("Splitting data: test_size=%.2f", self.config.test_size)
+        X, y = df["text"].values, df["intent"].values
         X_train, X_test, y_train, y_test = train_test_split(
-            X, y,
-            test_size=self.config.test_size,
-            random_state=self.config.random_state,
-            stratify=y,
+            X, y, test_size=self.test_size, random_state=self.random_state, stratify=y
         )
-        logger.info(
-            "Split sizes: train=%d, test=%d", len(X_train), len(X_test)
-        )
+        logger.info("Split: train=%d, test=%d", len(X_train), len(X_test))
 
-        # Fit TF-IDF vectorizer
         vectorizer = TfidfVectorizer(
-            max_features=self.config.max_features,
-            ngram_range=tuple(self.config.ngram_range),
-            min_df=self.config.min_df,
-            max_df=self.config.max_df,
+            max_features=self.max_features,
+            ngram_range=self.ngram_range,
+            min_df=self.min_df,
+            max_df=self.max_df,
             sublinear_tf=True,
             strip_accents="unicode",
             lowercase=True,
         )
-
-        logger.info("Fitting TF-IDF vectorizer (max_features=%s, ngram_range=%s).",
-                     self.config.max_features, self.config.ngram_range)
         X_train_tfidf = vectorizer.fit_transform(X_train)
         X_test_tfidf = vectorizer.transform(X_test)
+        logger.info("TF-IDF shapes: train=%s, test=%s", X_train_tfidf.shape, X_test_tfidf.shape)
 
-        logger.info(
-            "TF-IDF matrix shapes: train=%s, test=%s",
-            X_train_tfidf.shape, X_test_tfidf.shape,
-        )
-
-        # Save the vectorizer
-        vectorizer_path = os.path.join(
-            self.config.transformed_data_dir, "tfidf_vectorizer.pkl"
-        )
-        save_object(vectorizer, vectorizer_path)
-        logger.info("Saved TF-IDF vectorizer to %s", vectorizer_path)
+        vec_path = self.output_dir / "tfidf_vectorizer.pkl"
+        joblib.dump(vectorizer, vec_path)
+        logger.info("Saved vectorizer to %s", vec_path)
 
         return X_train_tfidf, X_test_tfidf, y_train, y_test, vectorizer

@@ -1,143 +1,288 @@
 # Day 17: Model Evaluation
 
-## Overview
+> **Phase:** Classical ML Mastery | **Week:** 3 | **Estimated Time:** 3-4 hours
 
-A model is only useful if you can measure its performance reliably. Today covers
-cross-validation strategies, the full menu of classification and regression
-metrics, ROC and precision-recall curves, and probability calibration -- the
-tools that separate rigorous evaluation from misleading accuracy numbers.
+## What You'll Learn Today
 
----
-
-## Learning Objectives
-
-- Implement k-fold, stratified k-fold, and time-series cross-validation.
-- Choose the right metric for the problem: accuracy, F1, log-loss, RMSE, MAE, R-squared.
-- Plot and interpret ROC curves, precision-recall curves, and AUC.
-- Calibrate predicted probabilities with Platt scaling and isotonic regression.
-- Avoid common evaluation pitfalls: data leakage, imbalanced accuracy, and overfitting to the test set.
+- Implement and interpret cross-validation strategies (k-fold, stratified, time-series split).
+- Build and read confusion matrices for binary and multi-class problems.
+- Calculate precision, recall, F1-score, and know when each metric matters.
+- Construct and interpret ROC curves and AUC scores.
+- Use scikit-learn's `classification_report` and `calibration_curve`.
+- Understand model calibration and why it matters for probability outputs.
+- Select the right metric for imbalanced, cost-sensitive, and business-driven problems.
 
 ---
 
-## Key Concepts
+## 1. What Is Model Evaluation?
 
-### Cross-Validation
-
-A single train/test split gives a noisy estimate of model performance. K-fold
-cross-validation rotates through k non-overlapping folds, training on k-1 and
-evaluating on the held-out fold each time. Stratified k-fold preserves class
-proportions in each fold, which is essential for imbalanced datasets. For time
-series, use `TimeSeriesSplit` to respect temporal ordering and prevent future
-data from leaking into training. The mean and standard deviation across folds
-give both an estimate and a confidence band.
-
-### Classification and Regression Metrics
-
-Accuracy is misleading when classes are imbalanced -- a 95-percent accuracy on a
-dataset with 95-percent negatives is no better than always predicting negative.
-Precision, recall, and F1 score address this by focusing on the positive class.
-Log-loss penalizes confident wrong predictions, making it ideal for models that
-output probabilities. For regression, RMSE penalizes large errors more than MAE,
-so choose based on whether outlier errors are especially costly. R-squared
-measures the fraction of variance explained but can be negative for very poor
-models.
-
-### ROC/AUC and Calibration
-
-The ROC curve plots true positive rate against false positive rate at every
-classification threshold. AUC (area under the ROC curve) summarizes this into a
-single number: 0.5 is random guessing, 1.0 is perfect. For imbalanced data, the
-precision-recall curve is more informative. Calibration measures whether
-predicted probabilities match observed frequencies -- a model that says "70
-percent chance of rain" should be correct 70 percent of the time. Platt scaling
-(logistic regression on model outputs) and isotonic regression are two common
-post-hoc calibration methods.
+Model evaluation quantifies how well a trained model generalizes to unseen data. A single train/test split is unreliable because performance depends on the random split. Rigorous evaluation answers: "Would this performance hold on the real data distribution?"
 
 ---
 
-## Practical Example
+## 2. Why Is It Used?
 
-```python
-# 17_model_evaluation.py
-"""Cross-validation, metrics, ROC curve, and calibration."""
+Without rigorous evaluation you risk:
 
-import numpy as np
-import matplotlib.pyplot as plt
-from sklearn.datasets import load_breast_cancer
-from sklearn.ensemble import GradientBoostingClassifier
-from sklearn.model_selection import (
-    cross_val_score, StratifiedKFold, cross_val_predict,
-)
-from sklearn.metrics import (
-    classification_report, roc_auc_score, roc_curve,
-    precision_recall_curve, average_precision_score, brier_score_loss,
-)
-from sklearn.calibration import CalibratedClassifierCV, calibration_curve
-from sklearn.preprocessing import StandardScaler
-from sklearn.pipeline import Pipeline
+- **Overfitting**: memorizing training data; poor production performance.
+- **Metric mismatch**: 99 % accuracy on a 99 % majority-class dataset is trivially achieved.
+- **Data leakage**: future information contaminating training, inflating metrics.
+- **Miscalibration**: a model saying "70 % probability" when the true event rate is 40 %.
 
-# Load data
-data = load_breast_cancer()
-X, y = data.data, data.target
+---
 
-# --- Cross-validation ---
-pipe = Pipeline([
-    ("scaler", StandardScaler()),
-    ("clf", GradientBoostingClassifier(n_estimators=100, random_state=42)),
-])
+## 3. Real-World Example
 
-cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-metrics = ["accuracy", "f1", "roc_auc", "neg_log_loss"]
-print("=== 5-Fold Stratified CV ===")
-for m in metrics:
-    scores = cross_val_score(pipe, X, y, cv=cv, scoring=m)
-    print(f"  {m:18s}: {scores.mean():.4f} +/- {scores.std():.4f}")
+**Fraud detection**: a model with 99.9 % accuracy on 0.1 % fraud rate is useless — it just predicts "not fraud" always. The relevant metrics are **precision** (of flagged transactions, how many are real fraud?) and **recall** (of all fraud, how many did we catch?). The business tradeoff is expressed via the **F-beta score** and the **precision-recall curve**.
 
-# --- ROC and Precision-Recall ---
-y_proba = cross_val_predict(pipe, X, y, cv=cv, method="predict_proba")[:, 1]
+---
 
-fpr, tpr, _ = roc_curve(y, y_proba)
-roc_auc = roc_auc_score(y, y_proba)
+## 4. Intuition
 
-precision, recall, _ = precision_recall_curve(y, y_proba)
-ap = average_precision_score(y, y_proba)
+Think of a spam filter:
 
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
-ax1.plot(fpr, tpr, label=f"AUC = {roc_auc:.3f}")
-ax1.plot([0, 1], [0, 1], "k--")
-ax1.set_xlabel("False Positive Rate")
-ax1.set_ylabel("True Positive Rate")
-ax1.set_title("ROC Curve")
-ax1.legend()
+- **Precision**: of all emails marked spam, what fraction actually are? (Low precision = blocking legitimate email.)
+- **Recall**: of all actual spam, what fraction did we catch? (Low recall = spam gets through.)
+- **F1**: harmonic mean — penalizes lopsided precision/recall equally.
+- **ROC-AUC**: how well does the model rank positives above negatives across all classification thresholds?
 
-ax2.plot(recall, precision, label=f"AP = {ap:.3f}")
-ax2.set_xlabel("Recall")
-ax2.set_ylabel("Precision")
-ax2.set_title("Precision-Recall Curve")
-ax2.legend()
+---
 
-fig.tight_layout()
-fig.savefig("roc_pr_curves.png", dpi=150)
-plt.close(fig)
-print(f"\nROC AUC: {roc_auc:.4f}   Average Precision: {ap:.4f}")
+## 5. Mathematical Intuition
 
-# --- Calibration ---
-brier = brier_score_loss(y, y_proba)
-prob_true, prob_pred = calibration_curve(y, y_proba, n_bins=10)
-print(f"Brier score (lower is better): {brier:.4f}")
-print("Saved roc_pr_curves.png")
+```
+Confusion matrix (binary):
+                  Predicted Positive   Predicted Negative
+Actual Positive         TP                   FN
+Actual Negative         FP                   TN
+
+Precision  = TP / (TP + FP)
+Recall     = TP / (TP + FN)
+F1         = 2 · P · R / (P + R)
+F_β        = (1 + β²) · P · R / (β² · P + R)
+             β > 1 weights recall more; β < 1 weights precision more
+
+Accuracy   = (TP + TN) / (TP + TN + FP + FN)   ← misleading when imbalanced
+
+ROC curve  : TPR (= Recall) vs FPR = FP/(FP+TN) across thresholds
+AUC        : area under ROC curve; 0.5 = random, 1.0 = perfect
+
+Log-loss   = −(1/n) Σ [y·log(p) + (1−y)·log(1−p)]
+             penalizes confident wrong predictions heavily
 ```
 
 ---
 
-## Resources
+## 6. Worked Example
 
-- [scikit-learn Model Evaluation](https://scikit-learn.org/stable/modules/model_evaluation.html)
-- [scikit-learn Calibration Guide](https://scikit-learn.org/stable/modules/calibration.html)
-- [Google ML Crash Course: Classification Metrics](https://developers.google.com/machine-learning/crash-course/classification/roc-and-auc)
+Binary classifier on credit default (1 000 samples, 10 % default rate):
+
+| Metric | Value | Interpretation |
+|---|---|---|
+| Accuracy | 0.93 | Misleading — 90 % baseline by always predicting "no default" |
+| Precision | 0.68 | 68 % of flagged defaults are real |
+| Recall | 0.55 | We catch 55 % of actual defaults |
+| F1 | 0.61 | Balanced view |
+| ROC-AUC | 0.84 | Model ranks positives above negatives 84 % of the time |
+
+Lowering threshold from 0.5 → 0.3 raises recall to 0.78 but drops precision to 0.41 — acceptable if the cost of missing a default is high.
 
 ---
 
-## Up Next
+## 7. Python Implementation
 
-**Day 18 -- Hyperparameter Tuning:** GridSearchCV, RandomizedSearchCV, Optuna, and Bayesian optimization.
+```python
+# day17_model_evaluation.py
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.datasets import make_classification
+from sklearn.model_selection import (train_test_split, StratifiedKFold,
+                                     cross_val_score, learning_curve)
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (confusion_matrix, classification_report,
+                              roc_auc_score, roc_curve,
+                              precision_recall_curve, average_precision_score,
+                              precision_score, recall_score, f1_score,
+                              log_loss, ConfusionMatrixDisplay)
+from sklearn.calibration import calibration_curve
+import warnings
+warnings.filterwarnings("ignore")
+
+# ── 1. Imbalanced dataset ─────────────────────────────────────────────────────
+X, y = make_classification(n_samples=2000, n_features=20, n_informative=10,
+                            weights=[0.85, 0.15], random_state=42)
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.25, stratify=y, random_state=42)
+
+# ── 2. Train two models ───────────────────────────────────────────────────────
+rf = RandomForestClassifier(n_estimators=100, random_state=42)
+lr = LogisticRegression(max_iter=1000, random_state=42)
+rf.fit(X_train, y_train)
+lr.fit(X_train, y_train)
+
+y_pred_rf = rf.predict(X_test)
+y_prob_rf = rf.predict_proba(X_test)[:, 1]
+y_pred_lr = lr.predict(X_test)
+y_prob_lr = lr.predict_proba(X_test)[:, 1]
+
+# ── 3. Classification report ──────────────────────────────────────────────────
+print("=== Random Forest ===")
+print(classification_report(y_test, y_pred_rf,
+                             target_names=["No Default", "Default"]))
+print(f"Log-loss : {log_loss(y_test, y_prob_rf):.4f}")
+print(f"ROC-AUC  : {roc_auc_score(y_test, y_prob_rf):.4f}")
+print(f"PR-AUC   : {average_precision_score(y_test, y_prob_rf):.4f}")
+
+# ── 4. Stratified k-fold CV ───────────────────────────────────────────────────
+skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+cv_auc = cross_val_score(rf, X, y, cv=skf, scoring="roc_auc")
+print(f"\n5-Fold CV AUC: {cv_auc.mean():.4f} ± {cv_auc.std():.4f}")
+
+# ── 5. Threshold sweep ────────────────────────────────────────────────────────
+thresholds = np.arange(0.1, 0.9, 0.05)
+records = []
+for t in thresholds:
+    p = (y_prob_rf >= t).astype(int)
+    records.append({
+        "t": t,
+        "P": precision_score(y_test, p, zero_division=0),
+        "R": recall_score(y_test, p, zero_division=0),
+        "F1": f1_score(y_test, p, zero_division=0),
+    })
+
+best = max(records, key=lambda r: r["F1"])
+print(f"\nBest threshold by F1: {best['t']:.2f}  "
+      f"P={best['P']:.3f}  R={best['R']:.3f}  F1={best['F1']:.3f}")
+
+# ── 6. Plots ──────────────────────────────────────────────────────────────────
+fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+
+# ROC curves
+fpr_rf, tpr_rf, _ = roc_curve(y_test, y_prob_rf)
+fpr_lr, tpr_lr, _ = roc_curve(y_test, y_prob_lr)
+axes[0].plot(fpr_rf, tpr_rf, label=f"RF  AUC={roc_auc_score(y_test, y_prob_rf):.3f}")
+axes[0].plot(fpr_lr, tpr_lr, label=f"LR  AUC={roc_auc_score(y_test, y_prob_lr):.3f}")
+axes[0].plot([0, 1], [0, 1], "k--")
+axes[0].set_xlabel("FPR"); axes[0].set_ylabel("TPR")
+axes[0].set_title("ROC Curves"); axes[0].legend()
+
+# Precision-Recall curve
+prec_rf, rec_rf, _ = precision_recall_curve(y_test, y_prob_rf)
+axes[1].step(rec_rf, prec_rf, where="post",
+             label=f"RF  AP={average_precision_score(y_test, y_prob_rf):.3f}")
+axes[1].set_xlabel("Recall"); axes[1].set_ylabel("Precision")
+axes[1].set_title("Precision-Recall Curve"); axes[1].legend()
+
+# Calibration curve
+frac_pos, mean_pred = calibration_curve(y_test, y_prob_rf, n_bins=10)
+axes[2].plot(mean_pred, frac_pos, "s-", label="RF")
+axes[2].plot([0, 1], [0, 1], "k--", label="Perfect")
+axes[2].set_xlabel("Mean Predicted Probability")
+axes[2].set_ylabel("Fraction of Positives")
+axes[2].set_title("Calibration Curve"); axes[2].legend()
+
+plt.tight_layout()
+plt.savefig("model_evaluation.png", dpi=120)
+plt.close()
+print("model_evaluation.png saved.")
+```
+
+---
+
+## 8. Visualization
+
+```python
+# day17_visualization.py
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.datasets import make_classification
+from sklearn.model_selection import train_test_split, learning_curve
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import ConfusionMatrixDisplay, confusion_matrix
+
+X, y = make_classification(n_samples=1500, n_features=20,
+                            weights=[0.8, 0.2], random_state=0)
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.3,
+                                           stratify=y, random_state=0)
+clf = RandomForestClassifier(n_estimators=50, random_state=0).fit(X_tr, y_tr)
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+
+# Confusion matrix heatmap
+ConfusionMatrixDisplay(
+    confusion_matrix(y_te, clf.predict(X_te)),
+    display_labels=["Negative", "Positive"]
+).plot(ax=axes[0], colorbar=False)
+axes[0].set_title("Confusion Matrix (RF)")
+
+# Learning curve — train vs validation AUC by dataset size
+train_sizes, tr_scores, val_scores = learning_curve(
+    clf, X, y, cv=5, scoring="roc_auc",
+    train_sizes=np.linspace(0.1, 1.0, 8), random_state=0)
+
+axes[1].fill_between(train_sizes,
+    tr_scores.mean(1) - tr_scores.std(1),
+    tr_scores.mean(1) + tr_scores.std(1), alpha=0.2, color="steelblue")
+axes[1].plot(train_sizes, tr_scores.mean(1), "o-", color="steelblue", label="Train AUC")
+axes[1].fill_between(train_sizes,
+    val_scores.mean(1) - val_scores.std(1),
+    val_scores.mean(1) + val_scores.std(1), alpha=0.2, color="darkorange")
+axes[1].plot(train_sizes, val_scores.mean(1), "s-", color="darkorange", label="Val AUC")
+axes[1].set_xlabel("Training set size")
+axes[1].set_ylabel("ROC-AUC")
+axes[1].set_title("Learning Curve")
+axes[1].legend()
+
+plt.tight_layout()
+plt.savefig("evaluation_dashboard.png", dpi=120)
+plt.show()
+```
+
+---
+
+## 9. Common Mistakes
+
+1. **Accuracy on imbalanced data** — A 99 % majority-class dataset yields 99 % accuracy by always predicting the majority class. Always inspect per-class F1.
+2. **Data leakage in cross-validation** — Fitting a scaler on the full dataset before CV leaks test information. Wrap preprocessing inside a `Pipeline`.
+3. **Single train/test split** — High variance from one random split can mislead. Use stratified k-fold instead.
+4. **Ignoring calibration** — Poor calibration means predicted probabilities are unreliable even if ranking (AUC) is good. Use `CalibratedClassifierCV`.
+5. **Maximizing AUC without selecting a threshold** — AUC summarizes all thresholds; deployed models use one threshold that must match the business cost.
+6. **Macro vs weighted F1 confusion** — Macro treats all classes equally; weighted F1 weights by class support. Choose based on whether rare classes matter equally.
+
+---
+
+## 10. Interview Questions
+
+| # | Question | Answer |
+|---|---|---|
+| 1 | What is the difference between precision and recall? | Precision = TP/(TP+FP) — quality of positive predictions. Recall = TP/(TP+FN) — coverage of actual positives. |
+| 2 | When would you prioritize recall over precision? | When the cost of a false negative is high, e.g., cancer diagnosis, fraud detection. |
+| 3 | What does ROC-AUC measure? | The probability that a randomly chosen positive is ranked higher than a randomly chosen negative by the model. |
+| 4 | How does PR-AUC differ from ROC-AUC? | PR-AUC focuses on the positive class and is more informative when negatives vastly outnumber positives. |
+| 5 | Why use stratified k-fold? | To preserve class distribution in each fold, especially important for imbalanced datasets. |
+| 6 | What is model calibration? | A calibrated model's predicted probability p means the event occurs approximately p fraction of the time. |
+| 7 | What is F-beta score? | Weighted harmonic mean of precision and recall; β > 1 weights recall more; β < 1 weights precision more. |
+| 8 | What does a learning curve tell you? | If train and val curves converge high: good fit. Large gap: overfitting. Both low: underfitting. |
+| 9 | What is log-loss? | Cross-entropy between predicted probabilities and true labels; penalizes confident wrong predictions heavily. |
+| 10 | What is the difference between micro and macro averaging? | Micro aggregates TP/FP/FN across all classes first; macro computes per-class metrics then averages equally. |
+
+---
+
+## Exercises
+
+1. **Threshold optimization**: Train a `GradientBoostingClassifier` on a synthetic imbalanced dataset. Plot the precision-recall curve and find the threshold that maximizes F1. Compare to the default 0.5 threshold.
+
+2. **CV strategy comparison**: Compare `KFold`, `StratifiedKFold`, and `RepeatedStratifiedKFold` on the same classifier. Report mean and standard deviation of AUC for each and explain the differences.
+
+3. **Calibration improvement**: Train a `RandomForestClassifier` and a `LogisticRegression`. Plot their calibration curves. Apply `CalibratedClassifierCV` (sigmoid method) to the RF, re-plot, and explain the improvement.
+
+---
+
+## Key Takeaways
+
+- Accuracy is a misleading metric for imbalanced datasets; always inspect per-class precision, recall, and F1.
+- Stratified k-fold cross-validation gives more reliable generalization estimates than a single train/test split.
+- ROC-AUC summarizes ranking ability; PR-AUC is better for imbalanced problems.
+- The decision threshold must be chosen based on the business cost of false positives vs. false negatives.
+- Calibration ensures predicted probabilities are meaningful for downstream decision-making.

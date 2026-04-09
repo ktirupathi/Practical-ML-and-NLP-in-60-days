@@ -1,0 +1,61 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Customer Support Ticket Auto-Router — Docker Compose
+#
+# Services:
+#   api  — FastAPI + uvicorn, serving the ticket-routing endpoints
+#
+# Usage:
+#   docker compose up --build          # build and start
+#   docker compose up -d               # start in detached mode
+#   docker compose down                # stop and remove containers
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: support-ticket-router:latest
+    container_name: ticket_router_api
+    ports:
+      # Host port 8003 → container port 8000
+      - "8003:8000"
+    volumes:
+      # Mount the local artifacts directory so a pre-trained model can be used
+      # without rebuilding the image. To train inside the container, run:
+      #   docker compose run --rm api python train.py
+      - ./artifacts:/app/artifacts
+      - ./logs:/app/logs
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # ── Optional: one-shot training container ───────────────────────────────
+  train:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: support-ticket-router:latest
+    container_name: ticket_router_train
+    volumes:
+      - ./artifacts:/app/artifacts
+      - ./logs:/app/logs
+    environment:
+      - PYTHONUNBUFFERED=1
+    # Override the default CMD to run the training script instead of the API
+    command: ["python", "train.py"]
+    # Do not restart training automatically
+    restart: "no"
+    profiles:
+      - train
